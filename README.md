@@ -3,7 +3,7 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): Trending, Top volume and New pools, with market cap, age, liquidity, price
+- **List view** (default): Trending, Top volume, or both side by side, with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.
@@ -47,7 +47,7 @@ how to add another launchpad.
 
 ## Limits
 
-- All state is in memory, so a restart resets the 1h/24h figures and the New pools history.
+- All state is in memory, so a restart resets the 1h/24h figures.
 - On the free public RPC, swaps arrive about 2 seconds after their block, and Meteora DBC swaps are
   sampled rather than complete. LaserStream removes the sampling and should cut the delay; its real-world
   latency hasn't been measured here yet (that needs a live key).

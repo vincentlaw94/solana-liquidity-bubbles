@@ -3,3 +3,5 @@ node_modules/
 .claude/
 .env
 stream/data/
+stream/bundler-wallets.json.partial
+stream/bundler-wallets.json.tmp

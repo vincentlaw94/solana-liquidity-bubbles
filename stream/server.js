@@ -7,15 +7,17 @@
 //      RPC_HTTP, RPC_WS (default: Solana public mainnet), PORT (8787),
 //      RPC_RPS, RPC_METHOD_RPS, DBC_TX_PER_SEC (2, websocket mode only),
 //      PUMPSWAP_ALL=1 to show every PumpSwap pool (default: only tokens that graduated from a launchpad)
-//      BUNDLER_DB=0 to skip the hardcoded isitbundled.com bundler-wallet list (bundler-wallets.json)
+//      BUNDLER_DB=0 to turn off the isitbundled.com bundler-wallet flag (bundler-wallets.json),
+//      BUNDLER_REFRESH=0 to use the hardcoded list without refreshing it on start
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022MetadataUri } from './lib/decode.js';
 import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
-import { loadBundlerWallets } from './lib/bundlers.js';
+import { loadBundlerWallets, syncBundlerWallets } from './lib/bundlers.js';
 import { createImageProxy } from './lib/images.js';
 import { createRpc, createFailoverRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
@@ -70,9 +72,27 @@ function sendTo(c, type, payload) {
   c.ws.send(payload);
 }
 const broadcast = msg => { const s = JSON.stringify(msg); for (const c of clients) sendTo(c, msg.type, s); };
-// hardcoded list (refresh it with `npm run update-bundlers`); the server never contacts isitbundled.com
-const bundlers = loadBundlerWallets(path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'bundler-wallets.json'),
-  { enabled: process.env.BUNDLER_DB !== '0' });
+// Bundler wallets: the hardcoded list is used straight away, and refreshed from isitbundled.com in the
+// background on every start (the same download as `npm run update-bundlers`, about 30 minutes at one page
+// every ~1.2s). A restart during a refresh resumes it; a list refreshed under an hour ago is kept as is.
+const BUNDLER_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'bundler-wallets.json');
+const bundlers = loadBundlerWallets(BUNDLER_FILE, { enabled: process.env.BUNDLER_DB !== '0' });
+async function refreshBundlers() {
+  const age = Date.now() - Date.parse(bundlers.state.fetchedAt || 0);
+  if (age < 3600e3 && !existsSync(BUNDLER_FILE + '.partial')) { log('bundler list fetched under an hour ago: not refreshing'); return; }
+  const r = bundlers.state.refresh = { running: true, startedAt: Date.now(), page: 0, pages: null, wallets: 0, finishedAt: null, error: null };
+  log('bundler list: refreshing from isitbundled.com in the background');
+  try {
+    await syncBundlerWallets({ file: BUNDLER_FILE, log: s => { if (!s.startsWith('page ')) log('bundler list: ' + s); },
+      onPage: (page, pages, wallets) => Object.assign(r, { page, pages, wallets }) });
+    bundlers.reload();
+    log(`bundler list: now ${bundlers.state.count} wallets`);
+  } catch (e) {
+    r.error = e.message;
+    log('bundler list refresh failed (' + e.message + '), keeping the current list; the next start resumes it');
+  } finally { Object.assign(r, { running: false, finishedAt: Date.now() }); }
+}
+if (process.env.BUNDLER_DB !== '0' && process.env.BUNDLER_REFRESH !== '0') refreshBundlers();
 const market = new Market({ accounts, meta, prices, emit: broadcast, bundlers, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
 
 // ---- ingest ----
@@ -193,24 +213,27 @@ function trendScore(r, now) {
   const buyShare = r.buys5 / Math.max(1, r.buys5 + r.sells5);
   return Math.log10(1 + r.vol5) * (1 + Math.min(3, pace)) * (0.6 + buyShare) * (1 + Math.min(1, r.traders5 / 40)) * (1 + Math.max(0, Math.min(1, r.chg5 / 50)));
 }
-const LISTS = ['trending', 'top', 'new'];
-const NEW_WINDOW = 60 * 60e3;
-function pick(rows, cfg, selected) {
-  const now = Date.now();
+// "both" is the union of Trending and Top volume, each coin tagged with its place in each (rankT, rankV)
+const LISTS = ['trending', 'top', 'both'];
+const rankTop = (eligible, limit) => eligible.slice().sort((a, b) => b.vol24 - a.vol24 || b.vol5 - a.vol5).slice(0, limit);
+function rankTrending(eligible, limit, now) {
+  // require real activity and liquidity, otherwise one $5 trade on a dust pool "trends"
+  return eligible.filter(r => r.buys5 + r.sells5 >= 8 && r.liq >= 500)
+    .map(r => ({ ...r, score: +trendScore(r, now).toFixed(2) }))
+    .sort((a, b) => b.score - a.score).slice(0, limit);
+}
+function pick(rows, cfg) {
   const eligible = rows.filter(r => r.liq >= cfg.minLiq && (!cfg.genuine || r.genuine) && (!cfg.venues || cfg.venues.includes(r.venue)));
-  let out = [];
-  if (cfg.list === 'top') {
-    out = eligible.sort((a, b) => b.vol24 - a.vol24 || b.vol5 - a.vol5).slice(0, cfg.limit);
-  } else if (cfg.list === 'trending') {
-    // require real activity and liquidity, otherwise one $5 trade on a dust pool "trends"
-    out = eligible.filter(r => r.buys5 + r.sells5 >= 8 && r.liq >= 500)
-      .map(r => ({ ...r, score: +trendScore(r, now).toFixed(2) }))
-      .sort((a, b) => b.score - a.score).slice(0, cfg.limit);
-  } else if (cfg.list === 'new') {
-    out = eligible.filter(r => r.created && now - r.created < NEW_WINDOW).sort((a, b) => b.created - a.created).slice(0, cfg.limit);
-  }
-  if (selected && !out.some(r => r.id === selected)) { const s = rows.find(r => r.id === selected); if (s) out.push(s); }
-  return out;
+  if (cfg.list === 'top') return rankTop(eligible, cfg.limit);
+  const trending = rankTrending(eligible, cfg.limit, Date.now());
+  if (cfg.list === 'trending') return trending;
+  const out = new Map();
+  trending.forEach((r, i) => out.set(r.id, { ...r, rankT: i + 1 }));
+  rankTop(eligible, cfg.limit).forEach((r, i) => {
+    const o = out.get(r.id);
+    if (o) o.rankV = i + 1; else out.set(r.id, { ...r, rankV: i + 1 });
+  });
+  return [...out.values()];
 }
 function readConfig(m) {
   return {
@@ -305,7 +328,7 @@ let latestRows = [];
 // its live fields are re-sent only when one of them changed since that client last received them.
 const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders'];
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -316,10 +339,12 @@ function encode(r, keys) {
   }
   return JSON.stringify(o);
 }
-let encoded = new Map(); // id -> { s, d } JSON strings, rebuilt once per tick and shared by all clients
+// row -> { s, d } JSON strings, rebuilt once per tick and shared by all clients with the same list. Keyed by
+// row object, not id: one coin's row differs between lists (trend score, ranks).
+let encoded = new Map();
 function encodedFor(r) {
-  let e = encoded.get(r.id);
-  if (!e) encoded.set(r.id, e = { s: encode(r, STATIC), d: encode(r, DYNAMIC) });
+  let e = encoded.get(r);
+  if (!e) encoded.set(r, e = { s: encode(r, STATIC), d: encode(r, DYNAMIC) });
   return e;
 }
 function snapshotFor(c, pools, reset) {
@@ -345,7 +370,7 @@ let pickCache = new Map();
 function pickShared(cfg, selected) {
   const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + (cfg.venues || '');
   let base = pickCache.get(key);
-  if (!base) pickCache.set(key, base = pick(latestRows, cfg, null));
+  if (!base) pickCache.set(key, base = pick(latestRows, cfg));
   if (selected && !base.some(r => r.id === selected)) { const sr = latestRows.find(r => r.id === selected); if (sr) return base.concat(sr); }
   return base;
 }
@@ -480,6 +505,6 @@ wss.on('connection', ws => {
 
 server.listen(PORT, () => {
   console.log(`Launchpad stream on http://localhost:${PORT}  (ws://localhost:${PORT}/ws)`);
-  console.log(bundlers.state.error ? `Bundler wallets: ${bundlers.state.error}` : `Bundler wallets: ${bundlers.state.count} (hardcoded list, fetched ${bundlers.state.fetchedAt})`);
+  console.log(bundlers.state.error ? `Bundler wallets: ${bundlers.state.error}` : `Bundler wallets: ${bundlers.state.count} (list fetched ${bundlers.state.fetchedAt})`);
   console.log(`RPC ${HELIUS_RPC ? 'Helius (account lookups, up to ' + HELIUS_DAILY_CALLS + ' calls/day) with fallback to ' : ''}${RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***')}`);
 });
