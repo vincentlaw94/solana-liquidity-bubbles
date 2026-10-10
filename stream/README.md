@@ -118,10 +118,11 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
-- `GET /api/pools?list=trending|top|new&limit=100&minLiq=0&genuine=true`: a ranked pool list
+- `GET /api/pools?list=trending|top|both&limit=100&minLiq=0&genuine=true`: a ranked pool list
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
-  - `new`: pools whose creation the server saw on-chain in the last hour, newest first
+  - `both`: the union of the two (up to `limit` each); every row carries `rankT` and/or `rankV`, its place in
+    Trending and in Top volume
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a
     pool's static fields (names, logo, addresses), sent once and again only if they change; `d` carries its live
@@ -136,7 +137,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 Each pool row carries `holders` (wallets holding the coin, from Jupiter's token index, re-fetched every
 minute for coins on a connected client's list), `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
 `progress`, `graduated`, `created`, `icon`, `mint`, `flags` (reasons it looks inorganic, empty if none), `genuine`
-and, on the trending list, `score`.
+and, on the trending and both lists, `score`.
 
 **Genuine filter** (thresholds in `GENUINE` at the top of `lib/market.js`). A pool is flagged when any of these hold:
 
@@ -173,11 +174,13 @@ next to its name and a "Bundler deployer" note in the pool panel. This doesn't c
 filter, so flagged coins stay visible.
 
 The list is hardcoded in `bundler-wallets.json` (63,949 wallets as of 2026-10-10, one per line as
-`[address, launches, realized PnL in SOL]`). The server only reads that file and never contacts isitbundled.com.
-To refresh it, run `npm run update-bundlers`. It downloads the list again through the site's public API,
-one page every ~1.2s (about 30 minutes), resumes if interrupted, and rewrites the file so the diff shows what
-changed. `BUNDLER_DB=0` turns the flag off. `/api/stats` → `bundlerWallets` shows the count and date, and
-`/api/token?mint=` shows a coin's deployer.
+`[address, launches, realized PnL in SOL]`), so flags work as soon as the server starts.
+On every start the server also refreshes that file in the background. It downloads the list again through the
+site's public API, one page every ~1.2s (about 30 minutes), then rewrites the file and switches to the new list
+without a restart. A restart during a refresh resumes it, and a list fetched less than an hour ago isn't
+refreshed again. `npm run update-bundlers` runs the same refresh by hand. `BUNDLER_REFRESH=0` skips the
+refresh, and `BUNDLER_DB=0` turns the flag off. `/api/stats` → `bundlerWallets` shows the count, date and
+refresh progress, and `/api/token?mint=` shows a coin's deployer.
 
 ## Coin images
 

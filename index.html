@@ -187,8 +187,20 @@ table.pools td, .kv dd { transition: color .5s; }
 .flags ul { margin: 0; padding-left: 16px; color: var(--fg); }
 #tip .tip-flags { margin-top: 6px; color: var(--accent); font-size: 11px; }
 .ctl.check input { margin: 0; accent-color: var(--accent); }
-#listView { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
+#listView { position: absolute; inset: 0; display: flex; background: var(--bg); }
+.list-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.list-pane + .list-pane { border-left: 1px solid var(--line); }
+.pane-title { padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg); background: var(--panel);
+  border-bottom: 1px solid var(--line); box-shadow: inset 0 -2px 0 var(--accent); }
 #listView .list-scroll { flex: 1; min-height: 0; overflow: auto; }
+#panelBtn[aria-expanded] { border-color: var(--line); }
+#panelBtn:hover { border-color: var(--muted); }
+main.panel-off { grid-template-columns: minmax(0, 1fr); }
+main.panel-off aside { display: none; }
+@media (max-width: 1200px) {
+  #listView { flex-direction: column; }
+  .list-pane + .list-pane { border-left: 0; border-top: 1px solid var(--line); }
+}
 #hiddenBtn { display: inline-flex; align-items: center; gap: 6px; }
 #hiddenBtn svg { width: 14px; height: 14px; color: var(--muted); }
 table.pools { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -256,7 +268,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <div class="seg" role="group" aria-label="Pool list" id="srcSeg">
       <button type="button" data-v="trending" aria-pressed="true">Trending</button>
       <button type="button" data-v="top" aria-pressed="false">Top volume</button>
-      <button type="button" data-v="new" aria-pressed="false">New pools</button>
+      <button type="button" data-v="both" aria-pressed="false" title="Trending and Top volume side by side">Both</button>
     </div>
     <label class="ctl" for="colorBy">Color
       <select id="colorBy">
@@ -274,15 +286,6 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
         <option value="area">True area</option>
       </select>
     </label>
-    <label class="ctl" for="minLiq">Min liq
-      <select id="minLiq">
-        <option value="0">Any</option>
-        <option value="10000">$10K</option>
-        <option value="50000">$50K</option>
-        <option value="250000">$250K</option>
-        <option value="1000000">$1M</option>
-      </select>
-    </label>
     <div class="seg" role="group" aria-label="Layout" id="groupSeg">
       <button type="button" data-v="0" aria-pressed="false">Swarm</button>
       <button type="button" data-v="1" aria-pressed="true">By venue</button>
@@ -290,8 +293,8 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <button type="button" class="btn" id="hiddenBtn" hidden></button>
     <button type="button" class="btn" id="colBtn" aria-expanded="false" aria-controls="colPanel" hidden>Columns</button>
     <label class="ctl check" for="genuine" title="Hide pools with rug, wash-trading or honeypot red flags"><input type="checkbox" id="genuine" checked> Genuine only</label>
-    <label class="ctl check" for="logos"><input type="checkbox" id="logos" checked> Logos</label>
     <label class="ctl" for="q">Find <input type="search" id="q" placeholder="token or pair" autocomplete="off"></label>
+    <button type="button" class="btn" id="panelBtn" aria-controls="sidePanel" aria-expanded="true">Hide panel</button>
   </div>
 </header>
 
@@ -310,17 +313,24 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       </div>
     </div>
     <div id="listView" hidden>
-      <div class="list-scroll">
-        <table class="pools">
-          <thead><tr id="listHead"></tr></thead>
-          <tbody id="listBody"></tbody>
-        </table>
-        <div class="empty list-empty" id="listEmpty" hidden>No pools match. Clear the search or lower the minimum liquidity.</div>
+      <div class="list-pane" id="paneA">
+        <div class="pane-title" hidden></div>
+        <div class="list-scroll">
+          <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
+          <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
+        </div>
+      </div>
+      <div class="list-pane" id="paneB" hidden>
+        <div class="pane-title"></div>
+        <div class="list-scroll">
+          <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
+          <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
+        </div>
       </div>
     </div>
   </div>
 
-  <aside>
+  <aside id="sidePanel">
     <section>
       <div class="label" id="setLabel">Trending</div>
       <div class="stats">
@@ -357,7 +367,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <footer id="footStream">
       All data comes from your own server (stream/), which subscribes to Solana program logs and decodes every swap on Pump.fun (including graduated tokens on the Pump AMM),
       Raydium LaunchLab (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags and others). Each ripple is one real swap, sized by its USD value.
-      Top volume ranks by 24h volume, Trending by recent momentum, New pools by on-chain creation in the last hour.
+      Top volume ranks by 24h volume, Trending by recent momentum, and Both shows the two lists side by side.
       "Genuine only" hides pools with red flags: liquidity pulled, wash or self-trading, active mint or freeze authority,
       a pool holding almost all supply, an implausible market cap, or dust liquidity.
       Liquidity is the USD value of the quote-side reserve. Volumes and price changes count from when the server started (up to 24h).
@@ -367,7 +377,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 
 <script>
 // Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
-const LISTS = { trending: 'Trending', top: 'Top volume', new: 'New pools' };
+const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Trending + Top volume' };
 const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
 const DEX_PALETTE = ['#f3b33d', '#5aa9ff', '#c38bff', '#2ed3a3', '#ff8a5c', '#ff6fb1', '#9ee35b', '#4fd6e8'];
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -377,7 +387,7 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
-const state = { list: 'trending', colorBy: 'm5', group: true, minLiq: 0, genuine: true, hidden: [], size: 'log', view: 'list', logos: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
+const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], size: 'log', view: 'list', panel: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
                 lastUpdate: 0, error: null };
 let nodes = [];
 const byId = new Map();
@@ -437,7 +447,8 @@ function getDexColor(d) {
 const realImage = url => url && /^https?:/.test(url) && !/missing/i.test(url) ? url : null;
 function fromStream(r, i) {
   return {
-    id: r.id, rank: i + 1, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
+    // rankT / rankV: place in Trending / Top volume when both lists are shown
+    id: r.id, rank: i + 1, rankT: r.rankT ?? null, rankV: r.rankV ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
     vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg: { m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
     buys5: r.buys5, sells5: r.sells5, price: r.price, mcap: r.mcap || 0, flags: r.flags || [],
     created: r.created || 0, born: r.born || 0, firstSeen: r.firstSeen, progress: r.progress, graduated: r.graduated,
@@ -497,7 +508,7 @@ const IMG_BASE = location.port === '8787' ? '' : STREAM_URL.replace(/^ws/, 'http
 const imgSrc = u => IMG_BASE + '/img?u=' + encodeURIComponent(u);
 const feed = [];
 function streamSend(m) { if (stream.open) stream.ws.send(JSON.stringify(m)); }
-function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, minLiq: state.minLiq, genuine: state.genuine }); }
+function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, genuine: state.genuine }); }
 function streamConnect() {
   if (stream.ws) return;
   clearTimeout(stream.timer);
@@ -626,7 +637,7 @@ function target(d) {
 // coins the viewer chose to hide, by mint (covers a coin's curve and its graduated pool alike)
 let hiddenMints = new Set();
 function visible(n) {
-  if (n.dying || n.liq < state.minLiq) return false;
+  if (n.dying) return false;
   if (n.mint && hiddenMints.has(n.mint)) return false;
   return true;
 }
@@ -675,7 +686,7 @@ new ResizeObserver(resize).observe(stage);
 // Token logos: cross-origin images can be drawn on a canvas (it only becomes unreadable, which is fine here).
 const logoCache = new Map();
 function logo(url) {
-  if (!url || !state.logos) return null;
+  if (!url) return null;
   let e = logoCache.get(url);
   // a logo that failed is tried again after a minute (the server may have found it on another gateway by then)
   if (!e || (e.failedAt && performance.now() - e.failedAt > 60000)) {
@@ -709,8 +720,8 @@ function logoFailed(img) {
 }
 function logoHtml(n, cls = 'logo') {
   const letter = esc((n.sym || '?').replace(/^\$/, '').charAt(0).toUpperCase());
-  const badge = '<span class="badge" style="background:' + getDexColor(n.dex) + '"' + (n.icon && state.logos ? ' hidden' : '') + '>' + letter + '</span>';
-  if (!n.icon || !state.logos) return badge;
+  const badge = '<span class="badge" style="background:' + getDexColor(n.dex) + '"' + (n.icon ? ' hidden' : '') + '>' + letter + '</span>';
+  if (!n.icon) return badge;
   // the lettered badge stands in if the logo fails to load
   const d = directUrl(n.icon), direct = d ? ' data-direct="' + esc(d) + '"' : '';
   return '<img class="' + cls + '" src="' + esc(imgSrc(n.icon)) + '"' + direct + ' alt="" loading="lazy" onerror="logoFailed(this)">' + badge;
@@ -1013,8 +1024,8 @@ const changeCol = (label, k) => ({ label, sort: n => n.chg[k], set: (td, n) => {
 // cells with a value and a small bar under it
 const initBar = color => td => { td.innerHTML = barCell(color); td._span = td.querySelector('span'); td._mini = td.querySelector('.mini'); td._bar = td._mini.firstElementChild; };
 const COLUMNS = {
-  // position in the selected list as ranked by the server (trend score, 24h volume, newest, ...)
-  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n) => { setT(td, String(n.rank ?? '–')); } },
+  // position in the list as ranked by the server (trend score or 24h volume); each pane says which rank it shows
+  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => { setT(td, String(ctx.rank(n) ?? '–')); } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
     init: td => {
       td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="warn-mark" hidden>⚠</span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
@@ -1022,7 +1033,7 @@ const COLUMNS = {
       td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot');
     },
     set: (td, n) => {
-      const key = ((state.logos && n.icon) || '') + '|' + n.sym + '|' + n.dex;
+      const key = (n.icon || '') + '|' + n.sym + '|' + n.dex;
       if (td._key !== key) { td._key = key; td._lg.innerHTML = logoHtml(n); }
       setT(td._b, n.sym);
       setT(td._small, '/ ' + n.quote);
@@ -1102,21 +1113,36 @@ function normalizeColumns(saved) {
 state.columns = normalizeColumns(null);
 const shownColumns = () => state.columns.filter(c => c.on).map(c => c.key);
 
-const listRows = new Map();
+// One table per list. With "Both", pane A shows the Trending coins and pane B the Top volume coins,
+// each ranked by its own list; otherwise pane A shows the whole list and pane B is hidden.
+const panes = ['paneA', 'paneB'].map(id => {
+  const el = $(id);
+  return { el, title: el.querySelector('.pane-title'), head: el.querySelector('thead tr'), body: el.querySelector('tbody'),
+    empty: el.querySelector('.list-empty'), rows: new Map(), rank: n => n.rank, include: () => true };
+});
+function setupPanes() {
+  const both = state.list === 'both', [a, b] = panes;
+  b.el.hidden = !both; a.title.hidden = !both;
+  a.rank = both ? n => n.rankT : n => n.rank;
+  a.include = both ? n => n.rankT != null : () => true;
+  b.rank = n => n.rankV; b.include = n => n.rankV != null;
+  setT(a.title, 'Trending'); setT(b.title, 'Top volume');
+  if (!both) { for (const tr of b.rows.values()) tr.remove(); b.rows.clear(); }
+}
 function renderHead() {
-  $('listHead').innerHTML = shownColumns().map(k => {
+  const html = shownColumns().map(k => {
     const c = COLUMNS[k];
     const sort = state.sort.key === k ? ' aria-sort="' + (state.sort.dir > 0 ? 'ascending' : 'descending') + '"' : '';
     return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.label) + '</button></th>';
   }).join('');
+  for (const p of panes) p.head.innerHTML = html;
 }
 function rebuildList() {
-  for (const tr of listRows.values()) tr.remove();
-  listRows.clear();
+  for (const p of panes) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); }
   renderHead(); renderList();
 }
-function sortValue(n, k) {
-  const v = (COLUMNS[k] || COLUMNS.liq).sort(n);
+function sortValue(n, k, pane) {
+  const v = k === 'rank' ? pane.rank(n) ?? Infinity : (COLUMNS[k] || COLUMNS.liq).sort(n);
   return typeof v === 'number' && !isFinite(v) ? -Infinity : v;
 }
 function makeRow(cols, id) {
@@ -1146,29 +1172,35 @@ function updateRow(tr, n, cols, ctx) {
 }
 function renderList() {
   if (state.view !== 'list') return;
-  const body = $('listBody'), cols = shownColumns();
+  const cols = shownColumns(), now = performance.now();
+  for (const p of panes) if (!p.el.hidden) renderPane(p, cols, now);
+}
+function renderPane(p, cols, now) {
   const { key, dir } = state.sort;
   // decorate-sort: one sort value per row instead of two per comparison
   const keyed = [];
-  for (const n of nodes) if (visible(n) && matches(n)) keyed.push([sortValue(n, key), n]);
+  for (const n of nodes) if (p.include(n) && visible(n) && matches(n)) keyed.push([sortValue(n, key, p), n]);
   keyed.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) * dir || b[1].liq - a[1].liq);
   const list = keyed.map(k => k[1]);
   let maxLiq = 1;
   for (const n of list) if (n.liq > maxLiq) maxLiq = n.liq;
   // bar widths are relative to the largest pool; bucket it so a 0.1% wiggle doesn't repaint every bar
-  const ctx = { maxLiq: +maxLiq.toPrecision(2), now: performance.now() }, seen = new Set();
+  const ctx = { maxLiq: +maxLiq.toPrecision(2), now, rank: p.rank }, seen = new Set();
   list.forEach((n, i) => {
-    let tr = listRows.get(n.id);
-    if (!tr) { tr = makeRow(cols, n.id); listRows.set(n.id, tr); }
+    let tr = p.rows.get(n.id);
+    if (!tr) { tr = makeRow(cols, n.id); p.rows.set(n.id, tr); }
+    // a coin can move between ranks without any other change: refresh the row when its rank moves
+    const rank = p.rank(n);
+    if (tr._rank !== rank) { tr._rank = rank; tr._v = -1; }
     updateRow(tr, n, cols, ctx);
-    if (body.children[i] !== tr) body.insertBefore(tr, body.children[i] || null);
+    if (p.body.children[i] !== tr) p.body.insertBefore(tr, p.body.children[i] || null);
     seen.add(n.id);
   });
-  for (const [id, tr] of listRows) if (!seen.has(id)) { tr.remove(); listRows.delete(id); }
+  for (const [id, tr] of p.rows) if (!seen.has(id)) { tr.remove(); p.rows.delete(id); }
   const empty = list.length > 0 || !nodes.length;
-  if ($('listEmpty').hidden !== empty) $('listEmpty').hidden = empty;
+  if (p.empty.hidden !== empty) p.empty.hidden = empty;
 }
-$('listHead').addEventListener('click', e => {
+for (const p of panes) p.head.addEventListener('click', e => {
   const th = e.target.closest('th'); if (!th) return;
   const k = th.dataset.k;
   state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (COLUMNS[k].align === 'l' || k === 'rank' ? 1 : -1) };
@@ -1244,8 +1276,8 @@ const SETTINGS_KEY = 'solana-liquidity-bubbles:settings:v1';
 function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      view: state.view, list: state.list, colorBy: state.colorBy, size: state.size,
-      minLiq: state.minLiq, group: state.group, logos: state.logos, genuine: state.genuine, hidden: state.hidden, sort: state.sort, columns: state.columns,
+      view: state.view, list: state.list, panel: state.panel, colorBy: state.colorBy, size: state.size,
+      group: state.group, genuine: state.genuine, hidden: state.hidden, sort: state.sort, columns: state.columns,
     }));
   } catch {}
 }
@@ -1257,10 +1289,9 @@ function restoreSettings() {
   state.list = oneOf(s.list, Object.keys(LISTS), state.list);
   state.colorBy = oneOf(s.colorBy, ['m5', 'h1', 'h24', 'progress', 'dex'], state.colorBy);
   state.size = oneOf(s.size, ['log', 'sqrt', 'area'], state.size);
-  state.minLiq = oneOf(s.minLiq, [0, 10000, 50000, 250000, 1000000], state.minLiq);
   if (typeof s.group === 'boolean') state.group = s.group;
-  if (typeof s.logos === 'boolean') state.logos = s.logos;
   if (typeof s.genuine === 'boolean') state.genuine = s.genuine;
+  if (typeof s.panel === 'boolean') state.panel = s.panel;
   if (Array.isArray(s.hidden)) {
     state.hidden = s.hidden.filter(h => h && typeof h.mint === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(h.mint))
       .map(h => ({ mint: h.mint, sym: String(h.sym || '').slice(0, 40) })).slice(-500);
@@ -1350,7 +1381,7 @@ function renderLegend() {
 // The panel is rebuilt only when its structure changes (another pool, flags appear, a row comes or goes).
 // Otherwise its numbers are updated in place, so the logo and links aren't re-created twice a second.
 function poolShape(n) {
-  return [n.id, n.sym, n.name, n.dex, state.logos && n.icon, n.mint, n.deployer, !!n.bundler, n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
+  return [n.id, n.sym, n.name, n.dex, n.icon, n.mint, n.deployer, !!n.bundler, n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
 }
 function renderPool(refreshOnly) {
   const el = $('poolPanel'), n = state.selected;
@@ -1444,8 +1475,16 @@ segment('srcSeg', v => {
   if (v === state.list) return;
   state.list = v; select(null);
   streamConfig(); // the server answers with the new list right away
-  applyListUi(); renderPanels();
+  setupPanes(); applyListUi(); renderPanels(); renderList();
 });
+// the right-hand panel (stats, open pool, launches) can be hidden to give the list the full width
+function setPanel(on) {
+  state.panel = on;
+  document.querySelector('main').classList.toggle('panel-off', !on);
+  $('panelBtn').textContent = on ? 'Hide panel' : 'Show panel';
+  $('panelBtn').setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+$('panelBtn').addEventListener('click', () => setPanel(!state.panel));
 function setView(v) {
   state.view = v;
   const list = v === 'list';
@@ -1463,16 +1502,14 @@ function syncControls() {
   const press = (id, v) => { for (const b of $(id).querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.v === String(v) ? 'true' : 'false'); };
   press('srcSeg', state.list); press('viewSeg', state.view); press('groupSeg', state.group ? '1' : '0');
   $('colorBy').value = state.colorBy; $('sizeMode').value = state.size;
-  $('minLiq').value = String(state.minLiq); $('logos').checked = state.logos; $('genuine').checked = state.genuine;
+  $('genuine').checked = state.genuine;
 }
 // every header control change is remembered in this browser
 for (const type of ['click', 'change']) document.querySelector('header').addEventListener(type, () => setTimeout(saveSettings));
 $('genuine').addEventListener('change', e => { state.genuine = e.target.checked; streamConfig(); });
-$('logos').addEventListener('change', e => { state.logos = e.target.checked; renderList(); renderPool(true); });
 $('sizeMode').addEventListener('change', e => { state.size = e.target.value; layoutClusters(); renderLegend(); });
 segment('groupSeg', v => { state.group = v === '1'; layoutClusters(); sim.alpha(0.8); });
 $('colorBy').addEventListener('change', e => { state.colorBy = e.target.value; renderLegend(); });
-$('minLiq').addEventListener('change', e => { state.minLiq = +e.target.value; streamConfig(); layoutClusters(); renderPanels(); });
 $('q').addEventListener('input', e => { state.query = e.target.value.trim(); });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
@@ -1480,7 +1517,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---------- boot ----------
-restoreSettings(); syncControls(); renderHead(); renderHiddenBtn(); setView(state.view);
+restoreSettings(); syncControls(); setPanel(state.panel); setupPanes(); renderHead(); renderHiddenBtn(); setView(state.view);
 resize(); applyListUi();
 startFrames();
 setInterval(() => {
