@@ -10,6 +10,7 @@ export const PROGRAMS = {
   dbc: 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN',       // Meteora Dynamic Bonding Curve (Bags, ...)
 };
 export const SOL = 'So11111111111111111111111111111111111111112';
+const SYSTEM = '11111111111111111111111111111111'; // an unset pubkey field
 export const EVENT_IX_TAG = 'e445a52e51cb9a1d'; // Anchor emit_cpi! prefix
 
 const disc = name => createHash('sha256').update('event:' + name).digest().subarray(0, 8).toString('hex');
@@ -63,6 +64,7 @@ export function decodeLogEvent(program, b) {
         buy: b[56] === 1, quoteRaw: u64(b, 40), baseRaw: u64(b, 48), user: pk(b, 57),
         vQuote: u64(b, 97), vBase: u64(b, 105), rQuote: u64(b, 113), rBase: u64(b, 121),
         ts: Number(b.readBigInt64LE(89)), // block time, seconds
+        creator: b.length >= 209 ? pk(b, 177) : null, // the coin's deployer
       };
     }
     if (d === D.create) {
@@ -91,6 +93,7 @@ export function decodeLogEvent(program, b) {
       kind: 'trade', program: 'pumpswap', pool: pk(b, 120), buy: d === D.buy,
       baseRaw: u64(b, 16), quoteRaw: u64(b, 64), poolBase: u64(b, 48), poolQuote: u64(b, 56), user: pk(b, 152),
       ts: Number(b.readBigInt64LE(8)),
+      creator: b.length >= 344 && pk(b, 312) !== SYSTEM ? pk(b, 312) : null, // coin_creator: set on graduated pump.fun coins
     };
   }
 

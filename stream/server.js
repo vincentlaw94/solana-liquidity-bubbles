@@ -5,6 +5,7 @@
 //      RPC_HTTP, RPC_WS (default: Helius RPC when a key is set, else Solana public mainnet), PORT (8787),
 //      RPC_RPS, RPC_METHOD_RPS, DBC_TX_PER_SEC (2, websocket mode only),
 //      PUMPSWAP_ALL=1 to show every PumpSwap pool (default: only tokens that graduated from a launchpad)
+//      BUNDLER_DB=0 to skip the isitbundled.com bundler-wallet list, BUNDLER_REFRESH_HOURS (24)
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,7 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent } from './lib/decode.js';
 import { createLaserStream } from './lib/laserstream.js';
+import { createBundlerDb } from './lib/bundlers.js';
 import { createRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
 
@@ -50,7 +52,13 @@ function sendTo(c, type, payload) {
   c.ws.send(payload);
 }
 const broadcast = msg => { const s = JSON.stringify(msg); for (const c of clients) sendTo(c, msg.type, s); };
-const market = new Market({ accounts, meta, prices, emit: broadcast, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
+const bundlers = createBundlerDb({
+  file: path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'data', 'bundler-wallets.json'),
+  enabled: process.env.BUNDLER_DB !== '0',
+  refreshHours: +process.env.BUNDLER_REFRESH_HOURS || 24,
+  log: s => console.log(new Date().toISOString(), s),
+});
+const market = new Market({ accounts, meta, prices, emit: broadcast, bundlers, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
 
 // ---- ingest ----
 const started = Date.now();
@@ -182,6 +190,7 @@ function stats() {
     tradesPerSec: +tps.toFixed(1), perProgram: rate.perSec, pools: market.pools.size, trades: market.counts.trades,
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
+    bundlerWallets: bundlers.state,
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
     rpc: rpc.stats, rpcUrl: RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***'),
     latency: {
@@ -223,9 +232,9 @@ let latestRows = [];
 // ---- list snapshots as deltas ----
 // A coin's static fields (names, logo, addresses) go to a client once, and again only if they change;
 // its live fields are re-sent only when one of them changed since that client last received them.
-const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen'];
+const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs'];
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -336,6 +345,7 @@ const server = http.createServer(async (req, res) => {
       out.push({
         id: p.id, program: p.program, ready: p.ready, resolving: !!p.resolving, pendingTrades: p.pending.length,
         graduated: p.graduated, successor: p.successor || null, mint: p.mint, quoteMint: p.quoteMint,
+        deployer: p.creator || null, deployerBundler: bundlers.get(p.creator) || null,
         baseSupply: p.baseSupply ?? null, quoteSupply: p.quoteSupply ?? null, quoteReserve: p.quoteRes, priceInQuote: p.price,
         quoteUsd: prices.get(p.quoteMint) ?? null, trades5m: p.buys + p.sells, lastTradeSecAgo: p.lastTs ? Math.round((Date.now() - p.lastTs) / 1000) : null,
         listed: !!row, flags: row?.flags || null,

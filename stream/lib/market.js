@@ -41,8 +41,8 @@ function dbcLabel(launchpad) {
 }
 
 export class Market {
-  constructor({ accounts, meta, prices, emit, pumpswapAll = false }) {
-    Object.assign(this, { accounts, meta, prices, emit, pumpswapAll });
+  constructor({ accounts, meta, prices, emit, bundlers = null, pumpswapAll = false }) {
+    Object.assign(this, { accounts, meta, prices, emit, bundlers, pumpswapAll });
     this.pools = new Map();
     this.outbox = [];
     this.counts = { trades: 0, unresolvedDrops: 0 };
@@ -77,10 +77,12 @@ export class Market {
         p.baseDec = b[18]; p.quoteDec = b[19];
         p.fundTarget = Number(b.readBigUInt64LE(69));
         p.mint = pk(b, 205); p.quoteMint = pk(b, 237);
+        p.creator = pk(b, 333); // pool creator: the launcher, or the platform's wallet on some platforms
         const plat = await this.accounts.get(pk(b, 173));
         p.platform = launchLabLabel(platformName(plat?.data));
       } else if (p.program === 'dbc') {
         p.mint = pk(b, 136);
+        p.creator = pk(b, 104); // pool creator: the launcher, or the launchpad's wallet (e.g. Bags)
         const cfg = await this.accounts.get(pk(b, 72));
         if (!cfg) throw new Error('config missing');
         p.quoteMint = pk(cfg.data, 8);
@@ -140,7 +142,7 @@ export class Market {
       if (curve) {
         // hand the coin's launch details over to its new pool; the curve itself can never trade again
         Object.assign(curve, { graduated: true, progress: 1, successor: p.id });
-        p.created = curve.created; p.createdName = curve.createdName;
+        p.created = curve.created; p.createdName = curve.createdName; p.creator = p.creator || curve.creator;
       }
       this.finish(p).catch(() => { p.resolving = false; this.resolve(p); });
     } else if (ev.kind === 'graduate') {
@@ -156,6 +158,7 @@ export class Market {
   }
 
   apply(p, ev, replay = false) {
+    if (ev.creator && !p.creator) p.creator = ev.creator;
     const qd = 10 ** p.quoteDec, bd = 10 ** p.baseDec;
     const quote = ev.quoteRaw / qd, base = ev.baseRaw / bd;
     if (p.program === 'pump') {
@@ -263,6 +266,8 @@ export class Market {
       const chg = (now_, then_) => then_ && now_ ? ((flip ? then_ / now_ : now_ / then_) - 1) * 100 : 0;
       const { liq, mcap, price } = this.value(p, p.price, p.quoteRes);
       const flags = this.flags(p, { flip, liq, mcap, vol5, wallets, trades: buys + sells });
+      const deployer = flip ? null : p.creator || null;
+      const bundler = this.bundlers?.get(deployer);
       out.push({
         id: p.id, program: p.program, venue: this.venue(p), mint: tokMint,
         sym: tok.symbol || (!flip && p.createdName?.symbol) || short(tokMint), name: tok.name || (!flip && p.createdName?.name) || '', icon: tok.icon || null,
@@ -270,6 +275,8 @@ export class Market {
         liq, price,
         mcap, // USD price x total on-chain supply of the launched token
         flags, genuine: flags.length === 0,
+        // deployer wallet, and whether isitbundled.com lists it as a bundler (shown, not filtered)
+        deployer, deployerBundler: !!bundler, bundlerLaunches: bundler?.launches ?? null, bundlerPnl: bundler?.pnl ?? null,
         vol5: vol5 * qUsd, vol60: vol60 * qUsd, vol24: vol24 * qUsd, buys5: flip ? sells : buys, sells5: flip ? buys : sells,
         traders5: wallets.size, // unique wallets; Pump.fun, PumpSwap and DBC name the trader, LaunchLab logs do not
         chg5: chg(p.price, first5),

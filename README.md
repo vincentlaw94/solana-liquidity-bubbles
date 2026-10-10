@@ -11,6 +11,8 @@ chain logs. There's no third-party market-data API in between.
   (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags, Moonshot and others).
 - **Genuine only filter**: hides rug pulls, wash trading, self-trading, active mint/freeze authority,
   implausible valuations and dust pools.
+- **Bundler deployers**: a red flag next to the token name when the coin's deployer is a known bundler wallet
+  on [isitbundled.com](https://isitbundled.com/wallets).
 - **Your settings**: hide coins, copy contract addresses, choose and reorder columns. All of it is saved
   in your browser.
 

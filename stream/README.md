@@ -111,7 +111,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/stats` → `perf`: ranking tick time, bytes per second per client (before and after compression), memory, CPU
   - `genuine` defaults to true: flagged pools are left out unless you pass `genuine=false`
 
-Each pool row carries `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
+Each pool row carries `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
 `progress`, `graduated`, `created`, `icon`, `mint`, `flags` (reasons it looks inorganic, empty if none), `genuine`
 and, on the trending list, `score`.
 
@@ -133,6 +133,26 @@ LaunchLab pools are only judged on the other rules.
 **Trending score**: log(5m volume) × (1 + pace, capped at 3) × (0.6 + buy share) × (1 + unique traders/40, capped at 2×)
 × (1 + positive 5m price change/50, capped at 2×). Pace is the last 5 minutes' volume divided by the pool's average
 5-minute volume over the tracked hour, so a pool that is suddenly busier than usual rises.
+
+## Bundler deployers
+
+Each coin's deployer wallet is read from chain data:
+
+| Venue | Deployer source |
+|---|---|
+| Pump.fun | `creator` in every trade event |
+| Pump.fun (graduated) | `coin_creator` in every PumpSwap trade event |
+| LaunchLab | Pool account creator (on some platforms, such as Stonk.fun, this can be the platform's own wallet) |
+| Meteora DBC | Pool account creator (on some launchpads, such as Bags, this is the launchpad's wallet) |
+
+If that wallet is in isitbundled.com's Wallet DB ("every wallet caught bundling"), the coin gets a red flag
+next to its name and a "Bundler deployer" note in the pool panel. This doesn't count toward the Genuine only
+filter, so flagged coins stay visible.
+
+The list (about 64,000 wallets, 1,279 pages) comes from isitbundled.com's public API at one page every ~1.2s.
+It's cached in `data/bundler-wallets.json` (git-ignored) and refreshed daily (`BUNDLER_REFRESH_HOURS`), and
+`BUNDLER_DB=0` turns it off. Wallets found during a sync are used straight away. `/api/stats` →
+`bundlerWallets` shows sync progress, and `/api/token?mint=` shows a coin's deployer.
 
 ## Graduations
 
