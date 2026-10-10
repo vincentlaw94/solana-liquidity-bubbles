@@ -155,7 +155,7 @@ export function token2022MetadataUri(data) {
       const v = data.subarray(o + 4, o + 4 + len);
       let p = 64;
       const str = () => { const n = v.readUInt32LE(p); const s = v.toString('utf8', p + 4, p + 4 + n); p += 4 + n; return s; };
-      try { str(); str(); const uri = str().trim(); return /^(https?|ipfs):\/\//.test(uri) ? uri : null; } catch { return null; }
+      try { str(); str(); const uri = str().trim().replace(/^(https?|ipfs):/i, m => m.toLowerCase()); return /^(https?|ipfs):\/\//.test(uri) ? uri : null; } catch { return null; }
     }
     if (!len && !type) break;
     o += 4 + len;

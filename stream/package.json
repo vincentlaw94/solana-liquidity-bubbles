@@ -16,6 +16,7 @@
     "@grpc/proto-loader": "0.8.1",
     "bs58": "6.0.0",
     "laserstream-core-proto-js": "9.1.0",
+    "sharp": "0.35.4",
     "ws": "8.18.0"
   }
 }

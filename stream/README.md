@@ -187,10 +187,20 @@ It's cached in `data/bundler-wallets.json` (git-ignored) and refreshed daily (`B
   that were fast and not rate-limited when tested in October 2026 (ipfs.filebase.io, pump.mypinata.cloud,
   then 4everland.io and gateway.pinata.cloud). Two are tried at once and the fastest wins. ipfs.io, dweb.link,
   w3s.link and nftstorage.link were answering 429 at the time.
-- **Caching:** images are cached in memory (64 MB) and served from our own origin, which also keeps the map's
-  canvas untainted. Failed logos are retried by the browser every 2 minutes.
-- **Safety:** the proxy only fetches public http(s) hosts, checked after DNS resolution and on every redirect,
-  accepts only image content types up to 1.5 MB, and serves images under a sandboxing CSP.
+- **Thumbnails:** downloads up to 10 MB are shrunk to 128x128 WebP with `sharp`. A 2.8 MB PNG becomes about
+  3 KB, the 64 MB memory cache holds thousands of logos, and SVGs are rasterised.
+- **Hosts and links:** at most 2 requests at a time go to each host, because some image hosts answer bursts
+  with 403s. Wrapper links (e.g. a Google Lens search for an image URL) are unwrapped, and `Https://` links
+  are accepted.
+- **Browser fallback:** some hosts, such as gmgn.ai, put server requests behind a Cloudflare bot challenge.
+  The proxy doesn't try to get around that. When the proxy fails, the page loads the original link directly
+  in the viewer's browser instead, the way any web page shows another site's image.
+- **Retries:** the proxy remembers a failure for 1 minute, and the page retries failed logos every minute.
+- **Safety:** the proxy only fetches public http(s) hosts, checked after DNS resolution and on every
+  redirect, accepts only content that decodes as an image, and serves it under a sandboxing CSP.
+
+In a 300-coin test, about 290 logos loaded through the proxy, 6 loaded directly in the browser, and 3 were
+deleted at their source (HTTP 404), so those coins show a letter badge.
 
 ## Graduations
 

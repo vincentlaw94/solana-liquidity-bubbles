@@ -676,23 +676,43 @@ const logoCache = new Map();
 function logo(url) {
   if (!url || !state.logos) return null;
   let e = logoCache.get(url);
-  // a logo that failed is tried again after 2 minutes (the server may have found it on another gateway by then)
-  if (!e || (e.failedAt && performance.now() - e.failedAt > 120000)) {
+  // a logo that failed is tried again after a minute (the server may have found it on another gateway by then)
+  if (!e || (e.failedAt && performance.now() - e.failedAt > 60000)) {
     e = { img: new Image(), ok: false };
     e.img.decoding = 'async';
     e.img.onload = () => { e.ok = e.img.naturalWidth > 0; };
-    e.img.onerror = () => { e.failedAt = performance.now(); };
+    // proxy first; if the proxy can't get it (some hosts block servers), let the browser load the original
+    e.img.onerror = () => {
+      const d = directUrl(url);
+      if (!e.direct && d) { e.direct = true; e.img.referrerPolicy = 'no-referrer'; e.img.src = d; }
+      else e.failedAt = performance.now();
+    };
     e.img.src = imgSrc(url);
     logoCache.set(url, e);
   }
   return e.ok ? e.img : null;
+}
+// the link the browser should load itself: unwrap search-by-image wrappers (e.g. Google Lens) like the proxy does
+function directUrl(u) {
+  try {
+    const x = new URL(u);
+    if (/(^|\.)google\.[a-z.]+$/.test(x.hostname)) { const inner = x.searchParams.get('url') || x.searchParams.get('imgurl'); if (inner && /^https?:/i.test(inner)) return inner; }
+    return /^https?:$/i.test(x.protocol) ? u : null;
+  } catch { return null; }
+}
+// <img> error handler: proxy failed -> load the original link directly -> failed too -> show the letter badge
+function logoFailed(img) {
+  const direct = img.dataset.direct;
+  if (direct && !img.dataset.triedDirect) { img.dataset.triedDirect = '1'; img.referrerPolicy = 'no-referrer'; img.src = direct; return; }
+  img.hidden = true; img.nextElementSibling.hidden = false;
 }
 function logoHtml(n, cls = 'logo') {
   const letter = esc((n.sym || '?').replace(/^\$/, '').charAt(0).toUpperCase());
   const badge = '<span class="badge" style="background:' + getDexColor(n.dex) + '"' + (n.icon && state.logos ? ' hidden' : '') + '>' + letter + '</span>';
   if (!n.icon || !state.logos) return badge;
   // the lettered badge stands in if the logo fails to load
-  return '<img class="' + cls + '" src="' + esc(imgSrc(n.icon)) + '" alt="" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">' + badge;
+  const d = directUrl(n.icon), direct = d ? ' data-direct="' + esc(d) + '"' : '';
+  return '<img class="' + cls + '" src="' + esc(imgSrc(n.icon)) + '"' + direct + ' alt="" loading="lazy" onerror="logoFailed(this)">' + badge;
 }
 
 const toBuy = d3.interpolateRgb(C.neutral, C.buy), toSell = d3.interpolateRgb(C.neutral, C.sell), toAccent = d3.interpolateRgb(C.neutral, C.accent);
@@ -965,13 +985,15 @@ document.addEventListener('click', e => {
 }, true);
 $('hiddenBtn').addEventListener('click', () => setHidden([]));
 
-// logos that failed in the list or panel get another try every 2 minutes
+// logos that failed in the list or panel get another try every minute
 setInterval(() => {
   for (const img of document.querySelectorAll('img.logo[hidden]')) {
     img.hidden = false; img.nextElementSibling.hidden = true;
-    img.src = img.src.replace(/&r=\d+$/, '') + '&r=' + Date.now();
+    delete img.dataset.triedDirect; img.removeAttribute('referrerpolicy');
+    const proxied = imgSrc(img.dataset.direct || '');
+    img.src = (img.dataset.direct ? proxied : img.src.replace(/&r=\d+$/, '')) + '&r=' + Date.now();
   }
-}, 120000);
+}, 60000);
 
 // ---------- list view ----------
 // Every column the list can show. `init` builds a cell once and `set` refreshes it in place,
