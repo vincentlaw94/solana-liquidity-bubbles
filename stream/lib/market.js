@@ -41,8 +41,9 @@ function dbcLabel(launchpad) {
 }
 
 export class Market {
-  constructor({ accounts, meta, prices, emit, bundlers = null, pumpswapAll = false }) {
-    Object.assign(this, { accounts, meta, prices, emit, bundlers, pumpswapAll });
+  constructor({ accounts, meta, prices, emit, bundlers = null, launchBundles = null, pumpswapAll = false }) {
+    // bundlers: isitbundled.com's wallet list; launchBundles: this server's own launch-bundle detector (lib/bundles.js)
+    Object.assign(this, { accounts, meta, prices, emit, bundlers, launchBundles, pumpswapAll });
     this.pools = new Map();
     this.outbox = [];
     this.counts = { trades: 0, unresolvedDrops: 0 };
@@ -131,6 +132,7 @@ export class Market {
       const p = this.pool(ev.pool, ev.program);
       p.created = Date.now();
       p.createdName = { symbol: ev.symbol, name: ev.name };
+      this.launchBundles?.onLaunch(ev);
       this.emit({ type: 'event', kind: 'create', pool: ev.pool, venue: this.venue(p), symbol: ev.symbol, name: ev.name, at: Date.now() });
     } else if (ev.kind === 'poolCreate') {
       // A PumpSwap pool was just created; for a pump.fun graduation this is where trading moves next.
@@ -183,6 +185,7 @@ export class Market {
     if (!isFinite(p.price)) p.price = 0;
     if (p.quoteRes > (p.peakQuoteRes || 0)) p.peakQuoteRes = p.quoteRes;
     if (!(quote >= 0) || !(base >= 0)) return; // malformed event: never let it reach clients
+    this.launchBundles?.onTrade(p, ev);
     // px / r: pool price and quote reserve right after this swap, so each swap carries its own valuation
     const t = { t: ev.at, b: ev.buy, q: quote, x: base, px: p.price, r: p.quoteRes, w: ev.user, s: ev.sig, sl: ev.slot || null, ct: ev.ts ? ev.ts * 1000 : null };
     p.w5.push(t);
@@ -268,6 +271,8 @@ export class Market {
       const flags = this.flags(p, { flip, liq, mcap, vol5, wallets, trades: buys + sells });
       const deployer = flip ? null : p.creator || null;
       const bundler = this.bundlers?.get(deployer);
+      // launch bundle found by this server (a graduated pump.fun coin keeps its curve's launch)
+      const lb = flip ? null : this.launchBundles?.row(p.program === 'pumpswap' ? 'pump:' + tokMint : p.id, tokMint);
       out.push({
         id: p.id, program: p.program, venue: this.venue(p), mint: tokMint,
         sym: tok.symbol || (!flip && p.createdName?.symbol) || short(tokMint), name: tok.name || (!flip && p.createdName?.name) || '', icon: tok.icon || null,
@@ -277,7 +282,12 @@ export class Market {
         flags, genuine: flags.length === 0,
         // deployer wallet, and whether isitbundled.com lists it as a bundler (shown, not filtered)
         deployer, deployerBundler: !!bundler, bundlerLaunches: bundler?.launches ?? null, bundlerPnl: bundler?.pnl ?? null,
+        // launch bundle: % of supply bought in the creation slot by the creator and wallets bundled with it
+        // (bundleEst until Jito or the launch block confirms which buys were bundled), and what those wallets hold now
+        bundledPct: lb?.bundledPct ?? null, block0Pct: lb?.block0Pct ?? null, bundleHeldPct: lb?.heldPct ?? null,
+        bundleWallets: lb?.bundleWallets ?? null, bundleFunded: lb?.fundedTogether ?? null, bundleEst: lb ? lb.est : null,
         holders: tok.holders ?? null, // from Jupiter's token index, refreshed every minute for listed coins
+        links: tok.links || null, // { x, web, tg } set by the coin's creator in its metadata (unverified)
         vol5: vol5 * qUsd, vol60: vol60 * qUsd, vol24: vol24 * qUsd, buys5: flip ? sells : buys, sells5: flip ? buys : sells,
         traders5: wallets.size, // unique wallets; Pump.fun, PumpSwap and DBC name the trader, LaunchLab logs do not
         chg5: chg(p.price, first5),

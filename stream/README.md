@@ -102,6 +102,9 @@ venue goes quiet, re-check its event layout first.
 | `RPC_METHOD_RPS` | `2.5` | Starting budget per RPC method; backs off on 429s |
 | `DBC_TX_PER_SEC` | `2` | Meteora DBC transactions fetched per second (only used without LaserStream) |
 | `PORT` | `8787` | HTTP + WebSocket port |
+| `BUNDLE_DETECT` | on | `0` turns off the launch-bundle detector (see Launch bundles) |
+| `FUNDING` | on | `0` skips tracing how launch wallets were funded |
+| `BACKFILL` | on | `0` skips rebuilding launches that happened before the server started |
 
 Without LaserStream, the free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
 rate-limits the follow-up HTTP calls. In practice:
@@ -123,6 +126,13 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   - `top`: by 24h volume
   - `both`: the union of the two (up to `limit` each); every row carries `rankT` and/or `rankV`, its place in
     Trending and in Top volume
+- `GET /api/bundle?mint=<mint>`: a launch's bundle report: status, shares of supply, every launch-window wallet with
+  its role, what it bought, sold and still holds, its funding, the groups funded together, and the bundles found.
+  202 with `backfill` progress while a coin that launched before the server started is being rebuilt; 404 if the
+  server can't produce one
+- `GET /api/bundles?limit=50&min=0`: recent launches where wallets bought alongside the creator, newest first
+  (`min`: smallest bundled %)
+- `GET /api/bundle-wallets?limit=100`: this server's compiled bundler-wallet DB, most launches first
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a
     pool's static fields (names, logo, addresses), sent once and again only if they change; `d` carries its live
@@ -136,7 +146,8 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 
 Each pool row carries `holders` (wallets holding the coin, from Jupiter's token index, re-fetched every
 minute for coins on a connected client's list), `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
-`progress`, `graduated`, `created`, `icon`, `mint`, `flags` (reasons it looks inorganic, empty if none), `genuine`
+`progress`, `graduated`, `created`, `icon`, `mint`, `links` (`{ x, web, tg }` from the coin's metadata file, set by its creator), `bundledPct`, `block0Pct`, `bundleHeldPct`, `bundleWallets`, `bundleFunded`, `bundleEst`
+(see Launch bundles), `flags` (reasons it looks inorganic, empty if none), `genuine`
 and, on the trending and both lists, `score`.
 
 **Genuine filter** (thresholds in `GENUINE` at the top of `lib/market.js`). A pool is flagged when any of these hold:
@@ -181,6 +192,107 @@ without a restart. A restart during a refresh resumes it, and a list fetched les
 refreshed again. `npm run update-bundlers` runs the same refresh by hand. `BUNDLER_REFRESH=0` skips the
 refresh, and `BUNDLER_DB=0` turns the flag off. `/api/stats` → `bundlerWallets` shows the count, date and
 refresh progress, and `/api/token?mint=` shows a coin's deployer.
+
+## Launch bundles
+
+The server detects launch bundles itself, for every pump.fun and LaunchLab launch it sees being created
+(`lib/bundles.js`). A bundle is a set of transactions that land together in one slot. Bundlers use one to
+create a coin and buy a large share of it from several wallets at once.
+
+**What it records.** From the stream: every buy in the creation slot, every wallet whose first buy lands within
+5 slots (about 2s), and afterwards each of those wallets' later buys and sells of the coin.
+
+**How it confirms which buys were bundled.**
+
+1. **Jito's bundle explorer API** (`bundles.jito.wtf`, the API behind explorer.jito.wtf). It's free, needs no key,
+   and is undocumented: no published rate limit or uptime promise. For each launch the detector asks which Jito
+   bundle the creation transaction landed in, then fetches that bundle's transactions, and does the same for
+   other launch-slot buys (up to 8 lookups per launch, 2 requests/second). Jito indexes with a delay, so
+   lookups run 20s after the launch and retry at 45s, 90s, 180s and 300s. A "not found" counts as final once
+   Jito has returned bundles from a slot well past the launch.
+2. **Fallback: rebuild bundles from block order.** When Jito doesn't answer (5 errors in a row rest it for
+   10 minutes, or the retries run out), the detector fetches the launch block (`getBlock` with
+   `transactionDetails: "accounts"`, about 7 MB) and groups up to 5 consecutive transactions that trade the
+   coin, pay one of Jito's 8 tip accounts, or share a signer, where at least one pays the tip. On a real launch
+   block (October 2026), 4 of 5 rebuilt bundles matched Jito's record exactly, and the 5th took in one extra
+   tip transaction. Because each block is heavy, this only runs for coins on a connected dashboard's list
+   (or the open pool), at most once every 30s, on the public RPC.
+
+Launches where nobody but the creator bought in the creation slot need no lookups ("solo"). Launches nobody
+is looking at that are still unchecked after 10 minutes are left as estimates ("unverified").
+
+**Roles.**
+
+| Role | Meaning |
+|---|---|
+| Creator | bought in the creation transaction (pump.fun's `creator` field is only a fallback: it can name a fee-share wallet) |
+| Bundled | bought in the same bundle as the creation |
+| Other bundle | bought in a coordinated launch-slot bundle: one carrying several buys of the coin, or one of several bundles that paid the identical tip (one operator) |
+| Funding-linked | a Launch slot buyer or Sniper funded together with the creator or a bundle wallet (see Funding) |
+| Launch slot | bought in the creation slot, not bundled with it (a lone Jito sniper lands here) |
+| Sniper | first bought 1–5 slots after the creation |
+
+**Figures.**
+
+- `bundledPct`: share of supply that the creator, Bundled and Other bundle wallets bought in the creation slot.
+  Until a launch is confirmed it's an estimate (`bundleEst`) that counts every creation-slot buy, shown with ≈.
+- `block0Pct`: every creation-slot buy.
+- `bundleHeldPct` and the report's `soldShare`: what those insiders still hold, and how much of what they got they
+  have sold, from swaps the server sees. Token transfers to other wallets aren't followed.
+
+**Funding.** Once a launch is checked, the detector traces where its 10 largest launch-window buyers (and the
+creator) got their first SOL (`lib/funding.js`):
+
+- **How:** page the wallet's signatures back to the oldest, read its oldest transactions until one raises its SOL
+  balance, and take the account that lost the most SOL there as the funder, with the amount and time.
+- **Old wallets:** a wallet with over 3,000 transactions is marked "old wallet" and not traced.
+- **Busy funders:** a funder that made 1,000 transactions within a day is marked busy: an exchange hot wallet,
+  bridge or service.
+- **Funded together:** wallets are grouped when they were funded within 3 minutes of each other, by the same
+  funder (unless it's busy), or by another launch wallet. An early buyer in a group with the creator or a bundle
+  wallet becomes Funding-linked and counts as an insider.
+- **Cache and order:** funding never changes, so results are kept for good in `data/wallet-funding.json`, and repeat
+  bundlers cost nothing after the first trace. It runs one wallet at a time on the public RPC: launches on someone's list
+  first, other launches only if they had a bundle and are under 15 minutes old.
+
+Checked against isitbundled.com on one coin (October 2026), the funders, amounts and timing matched for all
+5 wallets, including one bundle wallet funded by another.
+
+**Launches from before the server started.** The detector normally only knows launches it saw happen. For
+pump.fun coins on someone's list that it didn't see (on the curve or graduated), `lib/backfill.js` rebuilds the
+launch from chain history:
+
+1. It pages the mint's signatures back to the creation, one call per 1,000 transactions, up to 40,000.
+2. It decodes the pump.fun trades in the creation slot and the next 5 slots.
+3. It reads each launch wallet's token balance now.
+
+The launch then goes through the same Jito / fallback check and funding trace as a live one. Because only
+current balances are known, what a wallet got and no longer holds counts as "sold or moved". After that, live
+swaps update it as usual. It runs one coin at a time: open pools first, then by list rank. The pool panel shows
+progress while a coin is being read. In the same check it rebuilt the coin above in about 20 seconds.
+LaunchLab and Meteora DBC coins can't be backfilled, because their logs don't name the trader.
+
+**Public RPC limits.** The public RPC caps each IP at about 100 MB of data per 30 seconds, the live websocket
+included. When it's exceeded it answers 413 "You have used your data allowance". The RPC client then pauses
+all calls for 30 seconds, and requests time out after 30s so a stalled connection can't hang a job. Running two
+copies of the server on one IP is enough to hit the cap: both feeds stall and keep reconnecting. Funding traces
+and backfills retry rate-limited calls themselves.
+
+**Wallet DB.** Every wallet caught in a launch bundle (Bundled, Other bundle, Funding-linked, and the creator when
+other wallets bundled with it or were funded with it) is compiled into `data/bundle-wallets.json` with its launch count and last 5 mints. Reports
+flag wallets already caught in another launch here, or listed on isitbundled.com. One-off wallets drop out after
+14 days; repeat offenders stay. Launches you've stopped following (after 2 hours) are archived, up to 3,000, in
+`data/bundle-launches.json`, so `/api/bundles` survives restarts.
+
+**Dashboard.** A **Bundled** column (red at 20% or more, ≈ while estimated; hover for details), and a Launch
+bundle section in the pool panel with the wallet table (including who funded each wallet and when), the groups
+funded together, and links to each bundle on Jito's explorer. Coins launched before the server started show "–"
+until they're backfilled.
+
+In a 4-minute live run on the public websocket (October 2026), the detector followed about 40 launches a
+minute and checked each about 20s after launch, with no Jito rate limiting. That's close to the 2 requests a
+second it allows itself, so at busier times checks queue up. On one coin its result matched isitbundled.com
+exactly: 17% bundled, the same 5 wallets and percentages, 100% sold.
 
 ## Coin images
 

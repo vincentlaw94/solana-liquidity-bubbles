@@ -13,6 +13,13 @@ chain logs. There's no third-party market-data API in between.
   implausible valuations and dust pools.
 - **Bundler deployers**: a red flag next to the token name when the coin's deployer is a known bundler wallet
   on [isitbundled.com](https://isitbundled.com/wallets).
+- **Launch bundles**: the server checks every launch it sees for buys bundled with the creation, using Jito's
+  bundle explorer API with a fallback that rebuilds bundles from the launch block. A Bundled column shows the
+  share of supply insiders bought, and the pool panel lists their wallets, what they still hold and who funded them.
+  Wallets funded together are linked. Coins that launched before the server started are rebuilt from chain
+  history. Caught wallets are compiled into the server's own bundler-wallet DB.
+- **Links**: each coin shows the X, website and Telegram links its creator set (unverified), an Axiom button,
+  and a red flag when its launch was 20% bundled or more.
 - **Your settings**: hide coins, copy contract addresses, choose and reorder columns. All of it is saved
   in your browser.
 

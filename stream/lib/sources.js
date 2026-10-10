@@ -22,7 +22,8 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
       stats.calls++;
       let res;
       try {
-        res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+        // a stalled connection must not hang its caller forever (the public RPC stalls some when it's throttling)
+        res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(30000) });
       } catch (e) {
         stats.errors++;
         if (attempt >= 3) throw e;
@@ -32,10 +33,22 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
       if (res.status === 401 || res.status === 402 || res.status === 403) {
         throw Object.assign(new Error('access refused (HTTP ' + res.status + ')'), { access: true });
       }
+      if (res.status === 413) {
+        // the public RPC's per-IP data allowance (about 100 MB per 30s, websocket included): pause every method
+        const text = await res.text().catch(() => '');
+        if (/allowance/i.test(text)) {
+          stats.limited++; stats.dataCapped = (stats.dataCapped || 0) + 1;
+          nextSlot = Math.max(nextSlot, Date.now() + 30000);
+          if (attempt >= 3) throw new Error('rate limited (data allowance used)');
+          continue;
+        }
+        throw new Error('HTTP 413: ' + text.slice(0, 120));
+      }
       if (res.status === 429) {
         // a provider saying "out of credits" also answers 429: that's not something waiting fixes
         const text = await res.text().catch(() => '');
-        if (/credit|usage|plan|exceed|upgrade|quota/i.test(text)) throw Object.assign(new Error('out of credits: ' + text.slice(0, 120)), { access: true });
+        // ("Connection rate limits exceeded" from the public RPC is an ordinary rate limit: back off and retry)
+        if (!/rate limit|too many/i.test(text) && /credit|usage|plan|exceed|upgrade|quota/i.test(text)) throw Object.assign(new Error('out of credits: ' + text.slice(0, 120)), { access: true });
         stats.limited++;
         l.gap = Math.min(l.gap * 2, 20000);
         l.next = Date.now() + l.gap;
@@ -53,6 +66,17 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
   call.stats = stats;
   call.busy = method => lane(method).next - Date.now(); // ms until this method's next free slot
   return call;
+}
+
+// For background work that can wait (funding traces, backfills): retry a rate-limited call a few more times,
+// waiting longer each time, instead of failing the whole job.
+export function patient(rpc, tries = 6) {
+  return async (method, params) => {
+    for (let i = 0; ; i++) {
+      try { return await rpc(method, params); }
+      catch (e) { if (e.access || i >= tries || !/rate limit/i.test(e.message)) throw e; await sleep(3000 * (i + 1)); }
+    }
+  };
 }
 
 // Two RPC endpoints: a preferred one (e.g. Helius with a free key) and a fallback (the public RPC).
@@ -205,13 +229,15 @@ export const jupiterStats = jupiter.stats;
 // Token symbol/name/icon/launchpad/creation time from Jupiter's token index (100 mints per request), with
 // the coin's own metadata (its launch event, or the link stored on-chain in its mint) as the image fallback.
 // Coins still missing an image are looked up again every minute (the first retry after 20s).
+// The same metadata file carries the links the creator set (X, website, Telegram): read once per listed coin.
 const IMAGE_RETRY = [20e3, 60e3];
-export function createTokenMeta({ metadataImage, onchainUri } = {}) {
+export function createTokenMeta({ metadata, onchainUri } = {}) {
   const meta = new Map(), queue = new Set();
   const next = new Map(); // mint -> { n, at }: when it may be looked up again
   const statsAt = new Map(); // mint -> last holder-count refresh
   const uris = new Map(); // mint -> metadata URI from its launch event
   const uriQueue = [], uriBusy = new Set();
+  const linkTry = new Map(); // mint -> when its metadata may be tried again for links
   let uriActive = 0, running = false;
   const merge = (id, m) => meta.set(id, { ...(meta.get(id) || {}), ...m });
   const cap = (map, n) => { while (map.size > n) map.delete(map.keys().next().value); };
@@ -219,7 +245,8 @@ export function createTokenMeta({ metadataImage, onchainUri } = {}) {
   // the coin's own metadata JSON -> image, for coins Jupiter hasn't indexed yet or indexed without a logo.
   // The metadata link comes from the launch event, or else from the coin's mint account on-chain.
   function fromUri(id) {
-    if (!metadataImage || meta.get(id)?.icon || uriBusy.has(id)) return;
+    const m = meta.get(id);
+    if (!metadata || (m?.icon && m?.linksAt) || uriBusy.has(id)) return;
     if (!uris.has(id) && !onchainUri) return;
     uriBusy.add(id); uriQueue.push(id); drain();
   }
@@ -228,8 +255,9 @@ export function createTokenMeta({ metadataImage, onchainUri } = {}) {
       const id = uriQueue.shift(); uriActive++;
       (async () => {
         if (!uris.has(id)) { const u = await onchainUri(id).catch(() => null); if (u) { uris.set(id, u); cap(uris, 50000); } }
-        const img = uris.has(id) ? await metadataImage(uris.get(id)) : null;
-        if (img && !meta.get(id)?.icon) merge(id, { icon: img });
+        const md = uris.has(id) ? await metadata(uris.get(id)) : null;
+        if (md?.image && !meta.get(id)?.icon) merge(id, { icon: md.image });
+        if (md) merge(id, { links: md.links, linksAt: Date.now() });
       })().finally(() => { uriActive--; uriBusy.delete(id); drain(); });
     }
   }
@@ -266,10 +294,17 @@ export function createTokenMeta({ metadataImage, onchainUri } = {}) {
     statsAt.set(id, Date.now()); cap(statsAt, 20000);
     queue.add(id);
   }
+  // a listed coin's creator links: read its metadata file once (retried a minute later if unreadable)
+  function requestLinks(id) {
+    if (!id || meta.get(id)?.linksAt || Date.now() < (linkTry.get(id) || 0)) return;
+    linkTry.set(id, Date.now() + 60e3); cap(linkTry, 20000);
+    fromUri(id);
+  }
   return {
     get: id => meta.get(id),
     set: merge,
     request,
+    requestLinks,
     refreshStats,
     // a launch event's metadata link: try it shortly (IPFS uploads need a moment to propagate)
     setUri(id, uri) {
@@ -278,7 +313,11 @@ export function createTokenMeta({ metadataImage, onchainUri } = {}) {
       setTimeout(() => fromUri(id), 3000);
     },
     size: () => meta.size,
-    stats: () => { let icons = 0; for (const m of meta.values()) if (m.icon) icons++; return { tokens: meta.size, withImage: icons, lookupQueue: queue.size, metadataLinks: uris.size }; },
+    stats: () => {
+      let icons = 0, links = 0;
+      for (const m of meta.values()) { if (m.icon) icons++; if (m.links) links++; }
+      return { tokens: meta.size, withImage: icons, withLinks: links, lookupQueue: queue.size, metadataLinks: uris.size };
+    },
   };
 }
 
