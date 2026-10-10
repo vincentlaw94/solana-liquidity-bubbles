@@ -308,7 +308,7 @@ let latestRows = [];
 // its live fields are re-sent only when one of them changed since that client last received them.
 const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl'];
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -368,6 +368,12 @@ function pushPools(c, reset) {
 }
 // coins on any list that still have no image: look them up again every minute
 setInterval(() => { for (const r of latestRows) if (!r.icon) meta.request(r.mint); }, 15000);
+// holder counts for coins clients are looking at: refreshed every minute
+setInterval(() => {
+  const listed = new Set();
+  for (const c of clients) for (const id of c.visible) listed.add(id);
+  for (const r of latestRows) if (listed.has(r.id)) meta.refreshStats(r.mint);
+}, 15000);
 // server stats change slowly and are bulky: their own message every 2s
 setInterval(() => { if (clients.size) broadcast({ type: 'stats', stats: stats() }); }, 2000);
 

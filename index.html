@@ -444,6 +444,7 @@ function fromStream(r, i) {
     icon: realImage(r.icon),
     mint: r.mint,
     deployer: r.deployer || null,
+    holders: r.holders ?? null,
     bundler: r.deployerBundler ? { launches: r.bundlerLaunches, pnl: r.bundlerPnl } : null,
   };
 }
@@ -1072,13 +1073,15 @@ const COLUMNS = {
       setS(td._mini, 'visibility', n.progress == null ? 'hidden' : 'visible');
       setS(td._bar, 'width', ((n.progress || 0) * 100).toFixed(1) + '%');
     } },
+  holders: { label: 'Holders', sort: n => n.holders ?? -Infinity,
+    set: (td, n) => { setT(td, n.holders != null ? n.holders.toLocaleString() : '–'); if (!td.title) td.title = 'Wallets holding the coin (Jupiter, refreshed every minute)'; } },
   coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
     set: (td, n) => {
       setT(td, n.born ? ago(n.born) : '–');
       if (td._born !== n.born) { td._born = n.born; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; }
     } },
 };
-const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
+const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
 function normalizeColumns(saved) {
   const out = [], seen = new Set();
   for (const c of Array.isArray(saved) ? saved : []) {
@@ -1370,6 +1373,7 @@ function renderPool(refreshOnly) {
     '<dt>Price</dt><dd id="pvPrice">' + price(n.price) + '</dd>' +
     '<dt>Liquidity</dt><dd id="pvLiq">' + usdFine(n.liq) + '</dd>' +
     '<dt>Market cap</dt><dd id="pvMcap">' + usdFine(n.mcap || NaN) + '</dd>' +
+    '<dt>Holders</dt><dd data-f="holders">' + (n.holders != null ? n.holders.toLocaleString() : '–') + '</dd>' +
     '<dt>24h volume</dt><dd data-f="vol24">' + usd(n.vol24) + '</dd>' +
     '<dt>1h volume</dt><dd data-f="vol1">' + usd(n.vol1) + '</dd>' +
     '<dt>5m volume</dt><dd data-f="vol5">' + usd(n.vol5) + '</dd>' +
@@ -1396,6 +1400,7 @@ function refreshPool(n) {
   const tx = n.buys5 + n.sells5;
   const put = (k, t) => { const e = f(k); if (e) setT(e, t); };
   put('vol24', usd(n.vol24)); put('vol1', usd(n.vol1)); put('vol5', usd(n.vol5));
+  put('holders', n.holders != null ? n.holders.toLocaleString() : '–');
   put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
   if (n.progress != null) { put('progressText', progressText(n)); const b = f('progressBar'); if (b) setS(b, 'width', (n.progress * 100).toFixed(1) + '%'); }
   for (const k of ['m5', 'h1', 'h24']) { const e = f('chg_' + k); if (e) { setT(e, pct(n.chg[k])); setC(e, cls(n.chg[k])); } }

@@ -209,6 +209,7 @@ const IMAGE_RETRY = [20e3, 60e3];
 export function createTokenMeta({ metadataImage, onchainUri } = {}) {
   const meta = new Map(), queue = new Set();
   const next = new Map(); // mint -> { n, at }: when it may be looked up again
+  const statsAt = new Map(); // mint -> last holder-count refresh
   const uris = new Map(); // mint -> metadata URI from its launch event
   const uriQueue = [], uriBusy = new Set();
   let uriActive = 0, running = false;
@@ -243,7 +244,8 @@ export function createTokenMeta({ metadataImage, onchainUri } = {}) {
         const cur = meta.get(t.id) || {};
         const born = Date.parse(t.firstPool?.createdAt || t.createdAt || '');
         merge(t.id, { symbol: t.symbol || cur.symbol, name: t.name || cur.name, icon: t.icon || cur.icon || null,
-          launchpad: t.launchpad || cur.launchpad || null, decimals: t.decimals, born: born || cur.born || null });
+          launchpad: t.launchpad || cur.launchpad || null, decimals: t.decimals, born: born || cur.born || null,
+          holders: Number.isFinite(t.holderCount) ? t.holderCount : cur.holders ?? null });
       }
       for (const id of ids) if (!meta.get(id)?.icon) fromUri(id);
     } catch { ids.forEach(id => queue.add(id)); }
@@ -258,10 +260,17 @@ export function createTokenMeta({ metadataImage, onchainUri } = {}) {
     next.set(id, t); cap(next, 100000);
     queue.add(id);
   }
+  // holder counts change by the minute: re-fetch them for coins on the lists (batched with other lookups)
+  function refreshStats(id, everyMs = 60000) {
+    if (!id || queue.has(id) || Date.now() - (statsAt.get(id) || 0) < everyMs) return;
+    statsAt.set(id, Date.now()); cap(statsAt, 20000);
+    queue.add(id);
+  }
   return {
     get: id => meta.get(id),
     set: merge,
     request,
+    refreshStats,
     // a launch event's metadata link: try it shortly (IPFS uploads need a moment to propagate)
     setUri(id, uri) {
       if (!id || !uri || uris.has(id)) return;

@@ -133,7 +133,8 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/stats` → `perf`: ranking tick time, bytes per second per client (before and after compression), memory, CPU
   - `genuine` defaults to true: flagged pools are left out unless you pass `genuine=false`
 
-Each pool row carries `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
+Each pool row carries `holders` (wallets holding the coin, from Jupiter's token index, re-fetched every
+minute for coins on a connected client's list), `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
 `progress`, `graduated`, `created`, `icon`, `mint`, `flags` (reasons it looks inorganic, empty if none), `genuine`
 and, on the trending list, `score`.
 

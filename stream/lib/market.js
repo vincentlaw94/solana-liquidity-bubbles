@@ -277,6 +277,7 @@ export class Market {
         flags, genuine: flags.length === 0,
         // deployer wallet, and whether isitbundled.com lists it as a bundler (shown, not filtered)
         deployer, deployerBundler: !!bundler, bundlerLaunches: bundler?.launches ?? null, bundlerPnl: bundler?.pnl ?? null,
+        holders: tok.holders ?? null, // from Jupiter's token index, refreshed every minute for listed coins
         vol5: vol5 * qUsd, vol60: vol60 * qUsd, vol24: vol24 * qUsd, buys5: flip ? sells : buys, sells5: flip ? buys : sells,
         traders5: wallets.size, // unique wallets; Pump.fun, PumpSwap and DBC name the trader, LaunchLab logs do not
         chg5: chg(p.price, first5),
