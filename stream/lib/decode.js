@@ -144,6 +144,25 @@ export function decodeDbcTx(tx) {
   return out;
 }
 
+// Token-2022 mints can carry their metadata (name, symbol, metadata link) on-chain: after the 82-byte mint,
+// padding to byte 165 and an account-type byte, extensions follow as TLV entries (type u16, length u16, value).
+// Type 19 is TokenMetadata: update authority (32), mint (32), then name, symbol, uri as u32-prefixed strings.
+export function token2022MetadataUri(data) {
+  if (!data || data.length <= 170) return null;
+  for (let o = 166; o + 4 <= data.length;) {
+    const type = data.readUInt16LE(o), len = data.readUInt16LE(o + 2);
+    if (type === 19 && o + 4 + len <= data.length) {
+      const v = data.subarray(o + 4, o + 4 + len);
+      let p = 64;
+      const str = () => { const n = v.readUInt32LE(p); const s = v.toString('utf8', p + 4, p + 4 + n); p += 4 + n; return s; };
+      try { str(); str(); const uri = str().trim(); return /^(https?|ipfs):\/\//.test(uri) ? uri : null; } catch { return null; }
+    }
+    if (!len && !type) break;
+    o += 4 + len;
+  }
+  return null;
+}
+
 // LaunchLab PlatformConfig: name is a fixed [u8; 64] at offset 112.
 export function platformName(data) {
   if (!data || data.length < 176) return null;

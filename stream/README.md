@@ -38,11 +38,16 @@ mainnet access (Helius's Business plan or above, as of October 2026):
   second instead of retrying.
 - `/api/stats` → `source` shows the active feed and why.
 
+The dashboard header shows which providers are in use: a **Feed** chip (LaserStream or the websocket's
+provider) and a **Lookups** chip (Helius with today's usage, or the public RPC). Hover for details. An amber
+dot means the server is running on a fallback.
+
 Any key also speeds up account lookups: they go to Helius RPC first, within `HELIUS_DAILY_CALLS` (default
 40,000 a day, which is about 1M credits over 24 days if each call costs 1 credit), and fall back to the public
 RPC when the budget is spent or Helius refuses (bad key, out of credits). Heavy `getTransaction` calls and the
 websocket feed stay on the public endpoint, because Helius bills websocket data by volume and this feed would
-use up a free allowance within hours. `/api/stats` → `rpc.failover` shows usage.
+use up a free allowance within hours. Today's Helius call count is saved in `data/helius-usage.json`, so
+restarts don't reset the daily cap. `/api/stats` → `providers` and `rpc.failover` show what's in use.
 
 What changes compared with the public RPC websocket:
 
@@ -173,11 +178,11 @@ It's cached in `data/bundler-wallets.json` (git-ignored) and refreshed daily (`B
 
 ## Coin images
 
-- **Where image URLs come from:** Jupiter's token index. For pump.fun coins seen launching, the server also
-  reads the metadata link in the launch event and takes the image from there, which usually works before
-  Jupiter has indexed the coin.
-- **Retries:** coins on any list that still have no image are looked up again on a backing-off schedule
-  (20s, 1m, 2m, 5m, 10m, then every 30m).
+- **Where image URLs come from:** Jupiter's token index first. When Jupiter has no image, the server follows
+  the coin's own metadata link: from its launch event if the server saw the launch, otherwise from the
+  link stored on-chain in its Token-2022 mint account (pump.fun coins have one).
+- **Retries:** coins on any list that still have no image are looked up again every minute (the first retry
+  after 20s). In testing, coins without an image dropped from 18% to under 1% within 3 minutes of a restart.
 - **Proxy:** the dashboard loads every logo through `GET /img?u=<url>`. IPFS links are rewritten to gateways
   that were fast and not rate-limited when tested in October 2026 (ipfs.filebase.io, pump.mypinata.cloud,
   then 4everland.io and gateway.pinata.cloud). Two are tried at once and the fastest wins. ipfs.io, dweb.link,

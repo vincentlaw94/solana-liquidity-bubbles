@@ -13,7 +13,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent } from './lib/decode.js';
+import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022MetadataUri } from './lib/decode.js';
 import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
 import { createBundlerDb } from './lib/bundlers.js';
 import { createImageProxy } from './lib/images.js';
@@ -46,11 +46,13 @@ const rpc = HELIUS_RPC
   ? createFailoverRpc({
       primary: createRpc(HELIUS_RPC, { rps: 8, methodRps: 6 }), fallback: publicRpc,
       primaryMethods: ['getMultipleAccounts'], dailyBudget: HELIUS_DAILY_CALLS, log,
+      usageFile: path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'data', 'helius-usage.json'),
     })
   : publicRpc;
 const accounts = createAccountLoader(rpc);
 const images = createImageProxy();
-const meta = createTokenMeta({ metadataImage: images.metadataImage });
+// image fallback: the metadata link stored in a Token-2022 mint (pump.fun coins have one), read in batches
+const meta = createTokenMeta({ metadataImage: images.metadataImage, onchainUri: async mint => token2022MetadataUri((await accounts.get(mint, true))?.data) });
 const prices = createPrices();
 const clients = new Set();
 // performance counters, reported under /api/stats -> perf
@@ -241,6 +243,7 @@ function stats() {
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
+    providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
     rpc: rpc.stats, rpcUrl: RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***'),
@@ -267,6 +270,26 @@ function cpuPct() {
   const now = Date.now();
   if (now - cpuAt >= 2000) { const d = process.cpuUsage(cpuLast); cpuVal = +((d.user + d.system) / 1000 / (now - cpuAt) * 100).toFixed(1); cpuLast = process.cpuUsage(); cpuAt = now; }
   return cpuVal;
+}
+
+// Which RPC/stream providers are in use right now, for the dashboard (names and hosts only, never keys).
+const host = u => { try { return new URL(u).host; } catch { return null; } };
+const isPublic = u => /api\.mainnet-beta\.solana\.com/.test(u);
+function providers(now) {
+  const f = rpc.stats.failover; // only present when Helius is the preferred lookup RPC
+  const heliusUp = f && now >= f.downUntil && f.usedToday < f.dailyBudget;
+  return {
+    feed: feed.type === 'laserstream'
+      ? { name: 'Helius LaserStream', kind: 'gRPC', host: host(LASER_ENDPOINT) }
+      : { name: isPublic(RPC_WS) ? 'Public Solana RPC' : 'Custom RPC', kind: 'websocket', host: host(RPC_WS), note: feed.note,
+          nextLaserstreamCheck: LASER_KEY && feed.checkedAt ? feed.checkedAt + LASER_RECHECK_MS : null },
+    lookups: f
+      ? { name: heliusUp ? 'Helius RPC' : 'Public Solana RPC', preferred: 'Helius RPC', fallback: host(RPC_HTTP),
+          usedToday: f.usedToday, dailyBudget: f.dailyBudget,
+          why: heliusUp ? null : now < f.downUntil ? 'Helius unavailable: ' + f.reason : 'daily Helius budget used' }
+      : { name: isPublic(RPC_HTTP) ? 'Public Solana RPC' : 'Custom RPC', host: host(RPC_HTTP) },
+    transactions: { name: isPublic(RPC_HTTP) ? 'Public Solana RPC' : 'Custom RPC', note: 'Meteora DBC transaction fetches' },
+  };
 }
 
 // rolling latency samples (last 2000 swaps)
@@ -343,8 +366,8 @@ function pushPools(c, reset) {
   const msg = snapshotFor(c, pools, reset);
   if (msg) sendTo(c, 'pools', msg);
 }
-// coins on any list that still have no image: look them up again (each coin backs off on its own schedule)
-setInterval(() => { for (const r of latestRows) if (!r.icon) meta.request(r.mint); }, 30000);
+// coins on any list that still have no image: look them up again every minute
+setInterval(() => { for (const r of latestRows) if (!r.icon) meta.request(r.mint); }, 15000);
 // server stats change slowly and are bulky: their own message every 2s
 setInterval(() => { if (clients.size) broadcast({ type: 'stats', stats: stats() }); }, 2000);
 

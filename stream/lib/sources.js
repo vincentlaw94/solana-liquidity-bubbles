@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
 // Network edges: Solana RPC (HTTP + websocket log subscriptions) and Jupiter's free token/price APIs.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -57,9 +59,24 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
 // The preferred one is used for `primaryMethods` while it has budget left today; it is skipped for an
 // hour after it refuses access or reports it's out of credits, and any call it fails is retried on the
 // fallback. `dailyBudget` caps calls per UTC day so a monthly credit allowance lasts the whole cycle.
-export function createFailoverRpc({ primary, fallback, primaryMethods = null, dailyBudget = Infinity, cooldownMs = 3600e3, log = () => {} }) {
+export function createFailoverRpc({ primary, fallback, primaryMethods = null, dailyBudget = Infinity, cooldownMs = 3600e3, usageFile = null, log = () => {} }) {
   const day = () => Math.floor(Date.now() / 86400e3);
   const failover = { primaryMethods, dailyBudget, usedToday: 0, day: day(), downUntil: 0, reason: null, primaryCalls: 0, fallbackCalls: 0 };
+  // today's count survives restarts, otherwise each restart would hand out a fresh daily budget
+  if (usageFile) {
+    try {
+      const u = JSON.parse(readFileSync(usageFile, 'utf8'));
+      if (u.day === failover.day) failover.usedToday = u.usedToday || 0;
+    } catch {}
+    let saved = failover.usedToday;
+    const save = () => {
+      if (failover.usedToday === saved) return;
+      saved = failover.usedToday;
+      try { mkdirSync(path.dirname(usageFile), { recursive: true }); writeFileSync(usageFile, JSON.stringify({ day: failover.day, usedToday: failover.usedToday })); } catch {}
+    };
+    setInterval(save, 30000).unref();
+    process.on('exit', save);
+  }
   const usePrimary = method => {
     if (failover.day !== day()) { failover.day = day(); failover.usedToday = 0; }
     return (!primaryMethods || primaryMethods.includes(method)) && Date.now() >= failover.downUntil && failover.usedToday < dailyBudget;
@@ -186,10 +203,10 @@ const jupiter = (() => {
 export const jupiterStats = jupiter.stats;
 
 // Token symbol/name/icon/launchpad/creation time from Jupiter's token index (100 mints per request), with
-// the coin's own launch metadata as the image fallback. Coins still missing an image are retried on a
-// backing-off schedule (20s, 1m, 2m, 5m, 10m, then every 30m) until one turns up.
-const IMAGE_RETRY = [20e3, 60e3, 120e3, 300e3, 600e3, 1800e3];
-export function createTokenMeta({ metadataImage } = {}) {
+// the coin's own metadata (its launch event, or the link stored on-chain in its mint) as the image fallback.
+// Coins still missing an image are looked up again every minute (the first retry after 20s).
+const IMAGE_RETRY = [20e3, 60e3];
+export function createTokenMeta({ metadataImage, onchainUri } = {}) {
   const meta = new Map(), queue = new Set();
   const next = new Map(); // mint -> { n, at }: when it may be looked up again
   const uris = new Map(); // mint -> metadata URI from its launch event
@@ -198,17 +215,21 @@ export function createTokenMeta({ metadataImage } = {}) {
   const merge = (id, m) => meta.set(id, { ...(meta.get(id) || {}), ...m });
   const cap = (map, n) => { while (map.size > n) map.delete(map.keys().next().value); };
 
-  // the coin's own metadata JSON -> image, for coins Jupiter hasn't indexed yet or indexed without a logo
+  // the coin's own metadata JSON -> image, for coins Jupiter hasn't indexed yet or indexed without a logo.
+  // The metadata link comes from the launch event, or else from the coin's mint account on-chain.
   function fromUri(id) {
-    if (!metadataImage || !uris.has(id) || meta.get(id)?.icon || uriBusy.has(id)) return;
+    if (!metadataImage || meta.get(id)?.icon || uriBusy.has(id)) return;
+    if (!uris.has(id) && !onchainUri) return;
     uriBusy.add(id); uriQueue.push(id); drain();
   }
   function drain() {
     while (uriActive < 4 && uriQueue.length) {
       const id = uriQueue.shift(); uriActive++;
-      metadataImage(uris.get(id))
-        .then(img => { if (img && !meta.get(id)?.icon) merge(id, { icon: img }); })
-        .finally(() => { uriActive--; uriBusy.delete(id); drain(); });
+      (async () => {
+        if (!uris.has(id)) { const u = await onchainUri(id).catch(() => null); if (u) { uris.set(id, u); cap(uris, 50000); } }
+        const img = uris.has(id) ? await metadataImage(uris.get(id)) : null;
+        if (img && !meta.get(id)?.icon) merge(id, { icon: img });
+      })().finally(() => { uriActive--; uriBusy.delete(id); drain(); });
     }
   }
 

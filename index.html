@@ -47,6 +47,11 @@ header {
 .brand h1 { font: 700 20px/1 var(--display); letter-spacing: -0.01em; margin: 0; }
 .brand span { color: var(--muted); font-size: 12px; }
 .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rpc-info { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; }
+.rpc-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); cursor: help; white-space: nowrap; }
+.rpc-chip b { color: var(--fg); font-weight: 500; }
+.rpc-chip i { width: 6px; height: 6px; border-radius: 50%; background: var(--buy); }
+.rpc-chip.fallback i { background: var(--accent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--buy); box-shadow: 0 0 0 0 var(--buy); animation: pulse 2s infinite; }
 .dot.warn { background: var(--accent); box-shadow: none; animation: none; }
 .dot.err { background: var(--sell); box-shadow: none; animation: none; }
@@ -242,6 +247,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 <header>
   <div class="brand"><h1>Solana Liquidity Bubbles</h1><span>DEX pools · bubble area = pool liquidity (USD)</span></div>
   <div class="status" role="status" aria-live="polite"><span class="dot warn" id="dot"></span><span id="statusText">Connecting…</span></div>
+  <div class="rpc-info" id="rpcInfo" hidden></div>
   <div class="controls">
     <div class="seg" role="group" aria-label="View" id="viewSeg">
       <button type="button" data-v="map" aria-pressed="false">Map</button>
@@ -1240,10 +1246,30 @@ function restoreSettings() {
 }
 
 // ---------- side panels ----------
+// Which providers the server is using: live feed and account lookups, with details on hover.
+function renderRpcInfo(p) {
+  const el = $('rpcInfo');
+  if (!p) { el.hidden = true; return; }
+  const when = t => t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const f = p.feed, l = p.lookups;
+  const feedTip = f.name + ' (' + f.kind + (f.host ? ', ' + f.host : '') + ')' +
+    (f.note ? '\n' + f.note : '') + (f.nextLaserstreamCheck ? '\nNext LaserStream check: ' + when(f.nextLaserstreamCheck) : '');
+  const lookTip = l.preferred
+    ? l.name + (l.why ? ' (' + l.why + ')' : '') + '\nHelius calls today: ' + l.usedToday.toLocaleString() + ' of ' + l.dailyBudget.toLocaleString() +
+      '\nFallback: ' + l.fallback + '\nMeteora DBC transaction fetches: ' + p.transactions.name
+    : l.name + (l.host ? ' (' + l.host + ')' : '');
+  // amber dot = running on a fallback (LaserStream unavailable for the key, or Helius lookups unavailable/over budget)
+  const chip = (label, name, tip, fallback) => '<span class="rpc-chip' + (fallback ? ' fallback' : '') + '" title="' + esc(tip) + '"><i></i>' + label + ' <b>' + esc(name) + '</b></span>';
+  const feedFallback = !!f.nextLaserstreamCheck;
+  const lookName = l.name + (l.preferred && l.name === l.preferred ? ' · ' + l.usedToday.toLocaleString() + '/' + (l.dailyBudget / 1000) + 'k today' : '');
+  setH(el, chip('Feed', f.name, feedTip, feedFallback) + chip('Lookups', lookName, lookTip, l.preferred && l.name !== l.preferred));
+  el.hidden = false;
+}
 function renderStatus() {
   const dot = $('dot'), t = $('statusText');
   if (state.error) { dot.className = 'dot err'; t.textContent = state.error; return; }
   const s = stream.stats;
+  renderRpcInfo(s?.providers);
   dot.className = s && !s.connected ? 'dot warn' : 'dot';
   const lag = lagSamples.length ? [...lagSamples].sort((a, b) => a - b)[Math.floor(lagSamples.length / 2)] : null;
   t.textContent = !s ? 'Connected, warming up…' :
