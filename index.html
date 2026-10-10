@@ -1,0 +1,1334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Solana Liquidity Bubbles</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<style>
+/* Layout: full-bleed bubble stage on the left, a narrow instrument rail on the right (stacks under the stage on phones). */
+:root {
+  --bg: #090d16;
+  --panel: #0f1522;
+  --raise: #151c2d;
+  --line: #222b42;
+  --fg: #e7eaf3;
+  --muted: #8a93ad;
+  --faint: #5a6380;
+  --accent: #f3b33d;      /* amber: selection, focus, live */
+  --buy: #2ed3a3;
+  --sell: #ff6470;
+  --neutral: #39445f;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.45 var(--mono);
+  display: grid; grid-template-rows: auto 1fr;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+[hidden] { display: none !important; }
+
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+.brand h1 { font: 700 20px/1 var(--display); letter-spacing: -0.01em; margin: 0; }
+.brand span { color: var(--muted); font-size: 12px; }
+.status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--buy); box-shadow: 0 0 0 0 var(--buy); animation: pulse 2s infinite; }
+.dot.warn { background: var(--accent); box-shadow: none; animation: none; }
+.dot.err { background: var(--sell); box-shadow: none; animation: none; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(46,211,163,.6); } 70% { box-shadow: 0 0 0 8px rgba(46,211,163,0); } 100% { box-shadow: 0 0 0 0 rgba(46,211,163,0); } }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { background: transparent; border: 0; padding: 5px 10px; cursor: pointer; color: var(--muted); font-size: 12px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--raise); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+.ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+select, input[type="search"] {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; text-transform: none; letter-spacing: 0;
+}
+input[type="search"] { width: 150px; }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; min-height: 0; }
+#stage { position: relative; min-height: 0; overflow: hidden; }
+#stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+#stage.pointer canvas { cursor: pointer; }
+.overlay-msg[hidden] { display: none; }
+.overlay-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 13px; pointer-events: none; }
+.legend-float {
+  position: absolute; left: 12px; bottom: 12px; background: rgba(15,21,34,.88); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-size: 11px; color: var(--muted); max-width: calc(100% - 24px);
+  display: grid; gap: 6px; pointer-events: none;
+}
+.grad { height: 8px; width: 180px; max-width: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--sell), var(--neutral), var(--buy)); }
+.grad-labels { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.dex-keys { display: flex; flex-wrap: wrap; gap: 4px 10px; max-width: 320px; }
+.dex-keys i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+#tip {
+  position: absolute; pointer-events: none; z-index: 5; background: var(--raise); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px; min-width: 200px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+#tip h3 { margin: 0 0 6px; font: 700 15px/1.2 var(--display); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; font-variant-numeric: tabular-nums; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; text-align: right; }
+
+aside { border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
+section { padding: 14px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+.label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.stat b { display: block; font: 700 22px/1.1 var(--display); font-variant-numeric: tabular-nums; }
+.stat small { color: var(--muted); font-size: 11px; }
+.ratio { height: 6px; border-radius: 3px; background: var(--sell); overflow: hidden; }
+.ratio > div { height: 100%; background: var(--buy); transition: width .6s; }
+.ratio-labels { display: flex; justify-content: space-between; font-size: 11px; font-variant-numeric: tabular-nums; }
+.up { color: var(--buy); } .down { color: var(--sell); }
+
+.pool-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.pool-head h2 { margin: 0; font: 700 22px/1.15 var(--display); overflow-wrap: anywhere; }
+.chip { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.changes { display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 6px; }
+.changes div { background: var(--raise); border-radius: 6px; padding: 6px 8px; font-variant-numeric: tabular-nums; }
+.changes small { display: block; color: var(--muted); font-size: 10px; }
+.links { display: flex; gap: 14px; font-size: 12px; flex-wrap: wrap; }
+.close { background: none; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; cursor: pointer; color: var(--muted); }
+.empty { color: var(--muted); font-size: 12px; }
+
+.tape { display: grid; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tape-row { display: grid; grid-template-columns: 62px 38px 1fr auto; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--line); align-items: baseline; }
+.tape-row .t { color: var(--faint); }
+.tape-row .side { font-weight: 500; }
+.tape-row .usd { text-align: right; }
+.tape-row a { color: var(--muted); font-size: 11px; }
+.tape-row.new { animation: flashIn 1.6s ease-out; }
+@keyframes flashIn { from { background: rgba(243,179,61,.18); } to { background: transparent; } }
+
+.board { display: grid; gap: 2px; }
+.board button {
+  all: unset; display: grid; grid-template-columns: 18px 1fr auto auto; gap: 8px; align-items: baseline; padding: 5px 6px; border-radius: 6px;
+  cursor: pointer; font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.board button:hover, .board button:focus-visible { background: var(--raise); }
+.board button[aria-current="true"] { background: var(--raise); box-shadow: inset 2px 0 0 var(--accent); }
+.board .rk { color: var(--faint); }
+.board .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board .nm small { color: var(--faint); }
+.dexbars { display: grid; gap: 6px; font-size: 12px; }
+.dexbar { display: grid; grid-template-columns: 110px 1fr 64px; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.dexbar .bar { height: 6px; border-radius: 3px; background: var(--raise); overflow: hidden; }
+.dexbar .bar div { height: 100%; }
+.dexbar .v { text-align: right; color: var(--muted); }
+.feed { display: grid; gap: 2px; font-size: 12px; font-variant-numeric: tabular-nums; max-height: 220px; overflow-y: auto; }
+.feed button { all: unset; display: grid; grid-template-columns: 58px 44px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.feed button:hover, .feed button:focus-visible { background: var(--raise); }
+.feed .t { color: var(--faint); }
+.feed .k { font-size: 10px; font-weight: 500; letter-spacing: .06em; }
+.feed .k.new { color: var(--buy); } .feed .k.grad { color: var(--accent); }
+.feed .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed .v { color: var(--muted); font-size: 11px; }
+.feed .fresh { animation: flashIn 1.6s ease-out; }
+.progress { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
+.progress .bar { height: 6px; border-radius: 3px; background: var(--raise); overflow: hidden; }
+.progress .bar div { height: 100%; background: var(--accent); }
+.btn { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; color: var(--fg); }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 500; }
+.btn[aria-expanded="true"] { border-color: var(--accent); }
+.col-panel { position: absolute; top: 8px; right: 8px; z-index: 6; width: min(320px, calc(100% - 16px)); max-height: calc(100% - 16px); overflow: auto;
+  background: var(--raise); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.5); padding: 12px; display: grid; gap: 10px; }
+.col-head { display: grid; gap: 2px; }
+.col-head b { font: 700 16px/1.2 var(--display); }
+.col-head small, .col-foot small { color: var(--muted); font-size: 11px; }
+#colList { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+#colList li { display: grid; grid-template-columns: 16px 1fr auto auto; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; background: var(--panel); border: 1px solid transparent; }
+#colList li.dragging { opacity: .4; }
+#colList li.drop-before { border-top-color: var(--accent); }
+#colList li.drop-after { border-bottom-color: var(--accent); }
+#colList .grip { color: var(--faint); cursor: grab; text-align: center; user-select: none; }
+#colList label { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+#colList input { margin: 0; accent-color: var(--accent); }
+#colList .mv { background: none; border: 1px solid var(--line); border-radius: 5px; width: 26px; height: 24px; cursor: pointer; color: var(--muted); padding: 0; }
+#colList .mv:hover:not(:disabled) { color: var(--fg); border-color: var(--muted); }
+#colList .mv:disabled { opacity: .3; cursor: default; }
+.col-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ctl.check { cursor: pointer; }
+.tick-up { color: var(--buy); } .tick-down { color: var(--sell); }
+table.pools td, .kv dd { transition: color .5s; }
+.warn-mark { color: var(--accent); font-size: 13px; cursor: help; flex: none; }
+.flags { display: grid; gap: 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--accent); background: rgba(243,179,61,.08); font-size: 12px; }
+.flags b { color: var(--accent); font-weight: 500; }
+.flags ul { margin: 0; padding-left: 16px; color: var(--fg); }
+#tip .tip-flags { margin-top: 6px; color: var(--accent); font-size: 11px; }
+.ctl.check input { margin: 0; accent-color: var(--accent); }
+#listView { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
+#listView .list-scroll { flex: 1; min-height: 0; overflow: auto; }
+.hidden-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; }
+.hb-label { color: var(--muted); }
+.hb-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; min-width: 0; }
+.hb-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--raise); max-width: 160px; }
+.hb-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hb-chip button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px; font-size: 13px; line-height: 1; border-radius: 50%; }
+.hb-chip button:hover, .hb-chip button:focus-visible { color: var(--fg); background: var(--line); }
+.hb-more { color: var(--muted); align-self: center; }
+table.pools { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+table.pools th { position: sticky; top: 0; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line); text-align: right; padding: 0; }
+table.pools th button { all: unset; display: block; box-sizing: border-box; width: 100%; padding: 9px 12px; cursor: pointer; color: var(--muted);
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+table.pools th button:hover, table.pools th button:focus-visible { color: var(--fg); }
+table.pools th[aria-sort] button { color: var(--fg); }
+table.pools th[aria-sort="descending"] button::after { content: " ↓"; color: var(--accent); }
+table.pools th[aria-sort="ascending"] button::after { content: " ↑"; color: var(--accent); }
+table.pools th.l, table.pools td.l { text-align: left; }
+table.pools td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+table.pools tbody tr { cursor: pointer; transition: background-color .4s; }
+table.pools tbody tr:hover { background: var(--raise); }
+table.pools tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+table.pools tbody tr[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--accent); background: var(--raise); }
+.tok { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tok b { font: 700 14px/1.1 var(--display); }
+.tok small { color: var(--faint); }
+.copy { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 5px; border: 1px solid transparent;
+  background: none; color: var(--faint); cursor: pointer; vertical-align: middle; flex: none; }
+.copy:hover, .copy:focus-visible { color: var(--fg); border-color: var(--line); background: var(--raise); }
+.copy svg { width: 14px; height: 14px; }
+.copy.done { color: var(--buy); }
+.ca { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.ca .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; flex: none; }
+.ca code { font: 12px/1.3 var(--mono); color: var(--fg); overflow-wrap: anywhere; user-select: all; min-width: 0; }
+.ca .copy { border-color: var(--line); }
+.logo { width: 26px; height: 26px; border-radius: 50%; flex: none; object-fit: cover; background: var(--raise); }
+.badge { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center; font: 700 12px/1 var(--display); color: var(--bg); }
+.venue { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.venue i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.cellbar { display: grid; gap: 3px; justify-items: end; }
+.mini { width: 72px; height: 4px; border-radius: 2px; background: var(--raise); overflow: hidden; }
+.mini > div { height: 100%; }
+.mini.split { background: var(--sell); }
+.mini.split > div { background: var(--buy); }
+.list-empty { padding: 24px 16px; }
+.pool-head h2 { display: flex; align-items: center; gap: 10px; }
+.pool-head h2 .logo, .pool-head h2 .badge { width: 34px; height: 34px; }
+#tip h3 { display: flex; align-items: center; gap: 8px; }
+#tip h3 .logo, #tip h3 .badge { width: 22px; height: 22px; font-size: 10px; }
+footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: auto; }
+
+@media (max-width: 900px) {
+  body { grid-template-rows: auto auto; height: auto; }
+  main { grid-template-columns: 1fr; }
+  #stage { height: 70vh; min-height: 420px; }
+  aside { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+  input[type="search"] { width: 120px; }
+}
+@media (prefers-reduced-motion: reduce) { .dot { animation: none; } .tape-row.new { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><h1>Solana Liquidity Bubbles</h1><span>DEX pools · bubble area = pool liquidity (USD)</span></div>
+  <div class="status" role="status" aria-live="polite"><span class="dot warn" id="dot"></span><span id="statusText">Connecting…</span></div>
+  <div class="controls">
+    <div class="seg" role="group" aria-label="View" id="viewSeg">
+      <button type="button" data-v="map" aria-pressed="false">Map</button>
+      <button type="button" data-v="list" aria-pressed="true">List</button>
+    </div>
+    <div class="seg" role="group" aria-label="Pool list" id="srcSeg">
+      <button type="button" data-v="trending" aria-pressed="true">Trending</button>
+      <button type="button" data-v="top" aria-pressed="false">Top volume</button>
+      <button type="button" data-v="new" aria-pressed="false">New pools</button>
+    </div>
+    <label class="ctl" for="colorBy">Color
+      <select id="colorBy">
+        <option value="m5" selected>Price Δ 5m</option>
+        <option value="h1">Price Δ 1h</option>
+        <option value="h24">Price Δ 24h</option>
+        <option value="progress">Curve progress</option>
+        <option value="dex">Venue</option>
+      </select>
+    </label>
+    <label class="ctl" for="sizeMode">Size
+      <select id="sizeMode">
+        <option value="log" selected>Log scale</option>
+        <option value="sqrt">Compressed (√)</option>
+        <option value="area">True area</option>
+      </select>
+    </label>
+    <label class="ctl" for="minLiq">Min liq
+      <select id="minLiq">
+        <option value="0">Any</option>
+        <option value="10000">$10K</option>
+        <option value="50000">$50K</option>
+        <option value="250000">$250K</option>
+        <option value="1000000">$1M</option>
+      </select>
+    </label>
+    <div class="seg" role="group" aria-label="Layout" id="groupSeg">
+      <button type="button" data-v="0" aria-pressed="false">Swarm</button>
+      <button type="button" data-v="1" aria-pressed="true">By venue</button>
+    </div>
+    <button type="button" class="btn" id="colBtn" aria-expanded="false" aria-controls="colPanel" hidden>Columns</button>
+    <label class="ctl check" for="genuine" title="Hide pools with rug, wash-trading or honeypot red flags"><input type="checkbox" id="genuine" checked> Genuine only</label>
+    <label class="ctl check" for="logos"><input type="checkbox" id="logos" checked> Logos</label>
+    <label class="ctl" for="q">Find <input type="search" id="q" placeholder="token or pair" autocomplete="off"></label>
+  </div>
+</header>
+
+<main>
+  <div id="stage">
+    <canvas id="cv" aria-label="Bubble map of Solana DEX pools sized by liquidity"></canvas>
+    <div class="overlay-msg" id="overlay">Waiting for pools…</div>
+    <div class="legend-float" id="legend"></div>
+    <div id="tip" hidden></div>
+    <div id="colPanel" class="col-panel" role="dialog" aria-label="List columns" hidden>
+      <div class="col-head"><b>Columns</b><small>Drag rows or use the arrows to reorder. Unticked columns are hidden.</small></div>
+      <ol id="colList"></ol>
+      <div class="col-foot">
+        <small>Saved in this browser</small>
+        <span><button type="button" class="btn" id="colReset">Reset</button> <button type="button" class="btn primary" id="colDone">Done</button></span>
+      </div>
+    </div>
+    <div id="listView" hidden>
+      <div id="hiddenBar" class="hidden-bar" hidden>
+        <span class="hb-label" id="hbLabel"></span>
+        <span class="hb-chips" id="hbChips"></span>
+        <button type="button" class="btn" id="hbClear">Unhide all</button>
+      </div>
+      <div class="list-scroll">
+        <table class="pools">
+          <thead><tr id="listHead"></tr></thead>
+          <tbody id="listBody"></tbody>
+        </table>
+        <div class="empty list-empty" id="listEmpty" hidden>No pools match. Clear the search or lower the minimum liquidity.</div>
+      </div>
+    </div>
+  </div>
+
+  <aside>
+    <section>
+      <div class="label" id="setLabel">Trending</div>
+      <div class="stats">
+        <div class="stat"><b id="sLiq">–</b><small>Liquidity on map</small></div>
+        <div class="stat"><b id="sVol">–</b><small id="sVolLabel">24h volume</small></div>
+        <div class="stat"><b id="sVol5">–</b><small>5m volume</small></div>
+        <div class="stat"><b id="sTx5">–</b><small>5m trades</small></div>
+      </div>
+      <div>
+        <div class="ratio"><div id="sRatio" style="width:50%"></div></div>
+        <div class="ratio-labels"><span class="up" id="sBuys">buys –</span><span class="down" id="sSells">sells –</span></div>
+      </div>
+    </section>
+
+    <section id="poolPanel">
+      <div class="empty">Click a bubble to open the pool and stream its swaps.</div>
+    </section>
+
+    <section id="feedSection">
+      <div class="label">Launches &amp; graduations</div>
+      <div class="feed" id="feed"><div class="empty">New tokens and curve graduations appear here as they happen on-chain.</div></div>
+    </section>
+
+    <section>
+      <div class="label" id="boardLabel">Largest pools</div>
+      <div class="board" id="board"></div>
+    </section>
+
+    <section>
+      <div class="label">Liquidity by venue</div>
+      <div class="dexbars" id="dexbars"></div>
+    </section>
+
+    <footer id="footStream">
+      All data comes from your own server (stream/), which subscribes to Solana program logs and decodes every swap on Pump.fun (including graduated tokens on the Pump AMM),
+      Raydium LaunchLab (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags and others). Each ripple is one real swap, sized by its USD value.
+      Top volume ranks by 24h volume, Trending by recent momentum, New pools by on-chain creation in the last hour.
+      "Genuine only" hides pools with red flags: liquidity pulled, wash or self-trading, active mint or freeze authority,
+      a pool holding almost all supply, an implausible market cap, or dust liquidity.
+      Liquidity is the USD value of the quote-side reserve. Volumes and price changes count from when the server started (up to 24h).
+    </footer>
+  </aside>
+</main>
+
+<script>
+// Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
+const LISTS = { trending: 'Trending', top: 'Top volume', new: 'New pools' };
+const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
+const DEX_PALETTE = ['#f3b33d', '#5aa9ff', '#c38bff', '#2ed3a3', '#ff8a5c', '#ff6fb1', '#9ee35b', '#4fd6e8'];
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
+
+const state = { list: 'trending', colorBy: 'm5', group: true, minLiq: 0, genuine: true, hidden: [], size: 'log', view: 'list', logos: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
+                lastUpdate: 0, error: null };
+let nodes = [];
+const byId = new Map();
+const dexColor = new Map();
+let clusters = new Map();
+
+// ---------- formatting ----------
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function usd(v) {
+  if (!isFinite(v)) return '–';
+  const a = Math.abs(v);
+  if (a >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'K';
+  if (a >= 1) return '$' + v.toFixed(2);
+  return '$' + v.toFixed(2);
+}
+// one more digit than usd() so a single swap's move is visible ($14.48K, not $14.5K)
+function usdFine(v) {
+  if (!isFinite(v)) return '–';
+  const a = Math.abs(v);
+  if (a >= 1e9) return '$' + (v / 1e9).toFixed(3) + 'B';
+  if (a >= 1e6) return '$' + (v / 1e6).toFixed(3) + 'M';
+  if (a >= 1e3) return '$' + (v / 1e3).toFixed(2) + 'K';
+  return '$' + v.toFixed(2);
+}
+function price(v) {
+  if (!v) return '–';
+  if (v >= 1) return '$' + v.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  const s = v.toPrecision(4);
+  return '$' + (v < 1e-6 ? Number(s).toExponential(3) : Number(s).toString());
+}
+const pct = v => !isFinite(v) ? '–' : (v > 0 ? '+' : '') + v.toFixed(Math.abs(v) >= 100 ? 0 : 2) + '%';
+const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
+function ago(ts) {
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+const short = a => a ? a.slice(0, 4) + '…' + a.slice(-4) : '';
+// venue names arrive ready to display from the server
+const prettyDex = d => d || 'Unknown';
+function getDexColor(d) {
+  if (!dexColor.has(d)) dexColor.set(d, dexColor.size < DEX_PALETTE.length ? DEX_PALETTE[dexColor.size] : '#7c86a3');
+  return dexColor.get(d);
+}
+
+const realImage = url => url && /^https?:/.test(url) && !/missing/i.test(url) ? url : null;
+function fromStream(r, i) {
+  return {
+    id: r.id, rank: i + 1, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
+    vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg: { m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
+    buys5: r.buys5, sells5: r.sells5, price: r.price, mcap: r.mcap || 0, flags: r.flags || [],
+    created: r.created || 0, born: r.born || 0, firstSeen: r.firstSeen, progress: r.progress, graduated: r.graduated,
+    icon: realImage(r.icon),
+    mint: r.mint,
+  };
+}
+function ingestRecords(records, final = true) {
+  const ids = new Set();
+  for (const d of records) {
+    const id = d.id;
+    if (ids.has(id) || !(d.liq > 0)) continue;
+    ids.add(id);
+    getDexColor(d.dex);
+    let n = byId.get(id);
+    if (n) {
+      const delta = (d.liq - n.liq) / n.liq;
+      if (Math.abs(delta) > 0.001) { n.flash = 1; n.flashUp = delta > 0; }
+      Object.assign(n, d); n.dying = false;
+    } else {
+      const ang = Math.random() * Math.PI * 2, rad = Math.min(W, H) * (0.3 + Math.random() * 0.25);
+      n = { id, ...d, r: 0, flash: 0, ripples: [], dying: false, spawn: true, x: W / 2 + Math.cos(ang) * rad, y: H / 2 + Math.sin(ang) * rad, vx: 0, vy: 0 };
+      nodes.push(n); byId.set(id, n);
+    }
+  }
+  if (final) for (const n of nodes) if (!ids.has(n.id)) n.dying = true;
+  layoutClusters();
+  // new bubbles start inside their own venue's cluster instead of drifting across the canvas
+  for (const n of nodes) if (n.spawn) {
+    n.spawn = false;
+    const c = target(n), spread = (c.r || Math.min(W, H) / 4) * 0.8;
+    n.x = c.x + (Math.random() - 0.5) * spread; n.y = c.y + (Math.random() - 0.5) * spread;
+  }
+  sim.nodes(nodes); sim.alpha(0.6);
+  $('overlay').hidden = true;
+}
+
+// ---------- self-hosted chain stream ----------
+const STREAM_URL = new URLSearchParams(location.search).get('stream') || ((location.port === '8787' ? 'ws://' + location.host : 'ws://localhost:8787') + '/ws');
+const stream = { ws: null, open: false, stats: null, retry: 0, timer: null };
+const feed = [];
+function streamSend(m) { if (stream.open) stream.ws.send(JSON.stringify(m)); }
+function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, minLiq: state.minLiq, genuine: state.genuine }); }
+function streamConnect() {
+  if (stream.ws) return;
+  clearTimeout(stream.timer);
+  const ws = new WebSocket(STREAM_URL);
+  stream.ws = ws;
+  ws.onopen = () => {
+    stream.open = true; stream.retry = 0; state.error = null;
+    streamConfig();
+    if (state.selected) streamSend({ type: 'select', id: state.selected.id });
+    renderStatus();
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'pools') {
+      stream.stats = m.stats;
+      if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
+      if (m.pools.length) { ingestRecords(m.pools.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); }
+      // the open coin moved pools (bonding curve -> AMM after graduation): follow it
+      const sel = state.selected;
+      if (sel && (sel.dying || !byId.has(sel.id))) {
+        const next = nodes.find(n => !n.dying && n.mint === sel.mint && n.id !== sel.id);
+        if (next) select(next);
+      }
+      renderPanels(); renderStatus();
+    } else if (m.type === 'trades') onStreamTrades(m.trades);
+    else if (m.type === 'tape') {
+      if (state.selected?.id !== m.id) return;
+      tradeRows = m.trades.map(t => tapeRow(t, false)); tradeFor = state.selected.addr; renderTape(true);
+    } else if (m.type === 'event') pushFeed(m);
+  };
+  ws.onclose = () => {
+    const wasOpen = stream.open;
+    stream.ws = null; stream.open = false;
+    state.error = (wasOpen ? 'Lost the chain stream' : 'Chain stream not running') + ' at ' + STREAM_URL.replace('ws://', '').replace('/ws', '') + ', retrying';
+    renderStatus();
+    stream.timer = setTimeout(streamConnect, Math.min(15000, 1000 * 2 ** stream.retry++));
+  };
+}
+function tapeRow(t, isNew) {
+  return { kind: t.b ? 'buy' : 'sell', block_timestamp: t.t, volume_in_usd: t.u ?? 0, tx_hash: t.s, tx_from_address: t.w, isNew };
+}
+const lagSamples = []; // server decode -> this browser, ms (meaningful when server and browser share a clock)
+let listFrame = 0;
+function onStreamTrades(trades) {
+  if (!listFrame) listFrame = requestAnimationFrame(() => { listFrame = 0; renderList(); });
+  const sel = state.selected, fresh = [];
+  for (const t of trades) {
+    const n = byId.get(t.p);
+    if (!n) continue;
+    n.lastTrade = { at: performance.now(), b: !!t.b };
+    // every swap moves price, market cap and liquidity; don't wait for the next pool snapshot
+    if (t.pr != null) n.price = t.pr;
+    if (t.mc != null) n.mcap = t.mc;
+    if (t.lq != null) n.liq = t.lq;
+    // running totals between snapshots (the server's next snapshot replaces them with exact window values)
+    if (t.b) n.buys5++; else n.sells5++;
+    if (t.u > 0) { n.vol5 += t.u; n.vol1 += t.u; n.vol24 += t.u; }
+    lagSamples.push(Date.now() - t.t); if (lagSamples.length > 300) lagSamples.shift();
+    if (!REDUCED && n.ripples.length < 8) n.ripples.push({ t: 0, buy: !!t.b, s: Math.min(1.7, 0.45 + Math.log10(1 + Math.max(0, t.u || 0)) / 3), real: true });
+    if (sel && t.p === sel.id) fresh.push(tapeRow(t, true));
+  }
+  if (fresh.length) {
+    tradeRows = fresh.reverse().concat(tradeRows.map(r => ({ ...r, isNew: false }))).slice(0, 30);
+    tradeFor = sel.addr; renderTape(); updatePoolValues(sel);
+  }
+}
+function pushFeed(ev) {
+  feed.unshift({ ...ev, fresh: true });
+  feed.length = Math.min(feed.length, 40);
+  renderFeed();
+}
+function renderFeed() {
+  const el = $('feed');
+  if (!feed.length) return;
+  el.innerHTML = '';
+  for (const ev of feed) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    if (ev.fresh) { b.className = 'fresh'; ev.fresh = false; }
+    const grad = ev.kind === 'graduate';
+    b.innerHTML = '<span class="t">' + new Date(ev.at).toLocaleTimeString([], { hour12: false }) + '</span>' +
+      '<span class="k ' + (grad ? 'grad' : 'new') + '">' + (grad ? 'GRAD' : 'NEW') + '</span>' +
+      '<span class="nm">' + esc(ev.symbol || '?') + (ev.name ? ' <span class="v">' + esc(ev.name) + '</span>' : '') + '</span>' +
+      '<span class="v">' + esc(prettyDex(ev.venue || '')) + '</span>';
+    b.title = byId.has(ev.pool) ? 'Open this pool' : 'Not on the map yet: it appears once it trades enough to rank';
+    b.addEventListener('click', () => { const n = byId.get(ev.pool); if (n) select(n); });
+    el.appendChild(b);
+  }
+}
+
+// ---------- trades for the open pool ----------
+let tradeRows = [], tradeFor = null;
+function select(n) {
+  state.selected = n;
+  tradeRows = []; tradeFor = null;
+  renderPool(); renderBoard();
+  streamSend({ type: 'select', id: n ? n.id : null });
+}
+
+// ---------- canvas + physics ----------
+const stage = $('stage'), cv = $('cv'), ctx = cv.getContext('2d');
+let W = 800, H = 600, DPR = 1;
+const collide = d3.forceCollide(d => d.r + 2).iterations(3);
+const fx = d3.forceX(d => target(d).x).strength(0.09);
+const fy = d3.forceY(d => target(d).y).strength(0.09);
+const sim = d3.forceSimulation([]).force('collide', collide).force('x', fx).force('y', fy).velocityDecay(0.35).stop();
+
+function target(d) {
+  if (state.group && clusters.has(d.dex)) return clusters.get(d.dex);
+  return { x: W / 2, y: H / 2 };
+}
+// coins the viewer chose to hide, by mint (covers a coin's curve and its graduated pool alike)
+let hiddenMints = new Set();
+function visible(n) {
+  if (n.dying || n.liq < state.minLiq) return false;
+  if (n.mint && hiddenMints.has(n.mint)) return false;
+  return true;
+}
+function matches(n) {
+  if (!state.query) return true;
+  const q = state.query.toLowerCase();
+  return n.name.toLowerCase().includes(q) || n.addr.toLowerCase() === q;
+}
+// Bubble area per pool. "log" keeps $500 launchpad curves visible next to $10M AMM pools.
+const weight = n => state.size === 'area' ? n.liq : state.size === 'sqrt' ? Math.sqrt(n.liq) : Math.log10(1 + n.liq) ** 2;
+// Venue clusters are circles whose area matches their bubbles' total area (at ~60% packing),
+// packed with d3.packSiblings and then spread to the canvas aspect ratio.
+const PACK_DENSITY = 0.6;
+let clusterK = 0;
+function layoutClusters() {
+  clusters = new Map();
+  const groups = d3.rollups(nodes.filter(visible), v => ({ w: d3.sum(v, weight), liq: d3.sum(v, d => d.liq) }), d => d.dex)
+    .sort((a, b) => b[1].w - a[1].w);
+  if (!groups.length) { clusterK = 0; return; }
+  const circles = groups.map(([dex, g]) => ({ dex, liq: g.liq, r: Math.sqrt(g.w / PACK_DENSITY) + 2 }));
+  d3.packSiblings(circles);
+  const e = d3.packEnclose(circles);
+  const pad = 26; // room for cluster labels
+  const k = Math.min(W - pad, H - pad * 2) / (2 * e.r);
+  const sx = W > H ? Math.min(W / H, 1.8) : 1, sy = H > W ? Math.min(H / W, 1.8) : 1;
+  clusterK = k;
+  for (const c of circles) {
+    clusters.set(c.dex, { x: W / 2 + (c.x - e.x) * k * sx, y: H / 2 + pad / 2 + (c.y - e.y) * k * sy, r: c.r * k, liq: c.liq });
+  }
+}
+function scaleK() {
+  if (state.group) return clusterK;
+  const sum = d3.sum(nodes.filter(visible), weight);
+  if (!sum) return 0;
+  return Math.sqrt(0.48 * W * H / (Math.PI * sum));
+}
+function resize() {
+  const r = stage.getBoundingClientRect();
+  W = Math.max(200, r.width); H = Math.max(200, r.height); DPR = window.devicePixelRatio || 1;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  layoutClusters(); sim.alpha(0.5);
+}
+new ResizeObserver(resize).observe(stage);
+
+// Token logos: cross-origin images can be drawn on a canvas (it only becomes unreadable, which is fine here).
+const logoCache = new Map();
+function logo(url) {
+  if (!url || !state.logos) return null;
+  let e = logoCache.get(url);
+  if (!e) {
+    e = { img: new Image(), ok: false };
+    e.img.decoding = 'async';
+    e.img.referrerPolicy = 'no-referrer';
+    e.img.onload = () => { e.ok = e.img.naturalWidth > 0; };
+    e.img.src = url;
+    logoCache.set(url, e);
+  }
+  return e.ok ? e.img : null;
+}
+function logoHtml(n, cls = 'logo') {
+  const letter = esc((n.sym || '?').replace(/^\$/, '').charAt(0).toUpperCase());
+  const badge = '<span class="badge" style="background:' + getDexColor(n.dex) + '"' + (n.icon && state.logos ? ' hidden' : '') + '>' + letter + '</span>';
+  if (!n.icon || !state.logos) return badge;
+  // the lettered badge stands in if the logo fails to load
+  return '<img class="' + cls + '" src="' + esc(n.icon) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.hidden=true;this.nextElementSibling.hidden=false">' + badge;
+}
+
+function fillFor(n) {
+  if (state.colorBy === 'dex') return getDexColor(n.dex);
+  if (state.colorBy === 'progress') return n.progress == null ? C.neutral : d3.interpolateRgb(C.neutral, C.accent)(n.progress);
+  if (!isFinite(n.chg[state.colorBy])) return C.neutral;
+  const t = Math.max(-1, Math.min(1, n.chg[state.colorBy] / COLOR_RANGE[state.colorBy]));
+  const k = Math.sqrt(Math.abs(t));
+  return t >= 0 ? d3.interpolateRgb(C.neutral, C.buy)(k) : d3.interpolateRgb(C.neutral, C.sell)(k);
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const k = scaleK();
+  // grow/shrink bubbles toward their liquidity-derived radius
+  for (const n of nodes) {
+    const tr = visible(n) ? Math.max(3, Math.sqrt(weight(n)) * k) : 0;
+    n.r += (tr - n.r) * Math.min(1, dt * 5);
+    n.flash = Math.max(0, n.flash - dt * 0.8);
+    for (const rp of n.ripples) rp.t += dt / (rp.real ? 1.6 : 1.2);
+    if (n.ripples.length) n.ripples = n.ripples.filter(rp => rp.t < 1);
+  }
+  const before = nodes.length;
+  nodes = nodes.filter(n => !(n.dying && n.r < 0.5));
+  if (nodes.length !== before) {
+    for (const id of [...byId.keys()]) if (!nodes.some(n => n.id === id)) byId.delete(id);
+    if (state.selected && !byId.has(state.selected.id)) select(null);
+    sim.nodes(nodes);
+  }
+  collide.radius(d => d.r + 2); fx.x(d => target(d).x); fy.y(d => target(d).y);
+  sim.alpha(Math.max(sim.alpha(), 0.25)); sim.tick();
+  for (const n of nodes) {
+    n.x = Math.max(n.r, Math.min(W - n.r, n.x));
+    n.y = Math.max(n.r, Math.min(H - n.r, n.y));
+  }
+  // one bad value must never stop the animation loop
+  if (state.view === 'map') try { draw(); } catch (e) { console.error(e); }
+  requestAnimationFrame(frame);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // faint grid
+  ctx.strokeStyle = 'rgba(138,147,173,0.06)'; ctx.lineWidth = 1;
+  for (let x = 40; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, H); ctx.stroke(); }
+  for (let y = 40; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); ctx.stroke(); }
+
+  if (state.group) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.font = '500 11px ' + css('--mono');
+    for (const [dex, c] of clusters) {
+      // faint venue boundary + label above it
+      ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(138,147,173,0.10)'; ctx.setLineDash([3, 5]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+      const label = prettyDex(dex).toUpperCase() + '  ' + usd(c.liq);
+      const y = Math.max(14, c.y - c.r - 4);
+      ctx.fillStyle = 'rgba(231,234,243,0.55)';
+      ctx.fillText(label, Math.max(60, Math.min(W - 60, c.x)), y);
+    }
+  }
+
+  const q = !!state.query;
+  for (const n of nodes) {
+    if (n.r < 0.5) continue;
+    const dim = q && !matches(n);
+    ctx.globalAlpha = dim ? 0.15 : 1;
+    // ripples
+    for (const rp of n.ripples) {
+      const rr = Math.max(0, n.r + 2 + rp.t * (10 + n.r * 0.35) * rp.s);
+      ctx.beginPath(); ctx.arc(n.x, n.y, rr, 0, Math.PI * 2);
+      ctx.strokeStyle = rp.buy ? C.buy : C.sell;
+      ctx.globalAlpha = (dim ? 0.1 : 1) * (1 - rp.t) * (rp.real ? 0.9 : 0.45);
+      ctx.lineWidth = rp.real ? 2 : 1.2; ctx.stroke();
+    }
+    ctx.globalAlpha = dim ? 0.15 : 1;
+    // body
+    const col = fillFor(n);
+    const img = n.r > 7 ? logo(n.icon) : null;
+    if (img) {
+      // token logo fills the bubble; a thick ring carries the colour encoding instead
+      ctx.save();
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2); ctx.clip();
+      const sc = Math.max(2 * n.r / img.naturalWidth, 2 * n.r / img.naturalHeight);
+      const iw = img.naturalWidth * sc, ih = img.naturalHeight * sc;
+      ctx.drawImage(img, n.x - iw / 2, n.y - ih / 2, iw, ih);
+      if (n.r > 15) {
+        const sh = ctx.createLinearGradient(0, n.y, 0, n.y + n.r);
+        sh.addColorStop(0, 'rgba(9,13,22,0)'); sh.addColorStop(1, 'rgba(9,13,22,0.85)');
+        ctx.fillStyle = sh; ctx.fillRect(n.x - n.r, n.y, 2 * n.r, n.r);
+      }
+      ctx.restore();
+      const lw = Math.max(2, Math.min(6, n.r * 0.13));
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r - lw / 2, 0, Math.PI * 2);
+      ctx.lineWidth = lw; ctx.strokeStyle = col; ctx.stroke();
+      if (state.colorBy !== 'dex' && n.r > 6) {
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 1, 0, Math.PI * 2);
+        ctx.lineWidth = 1; ctx.strokeStyle = getDexColor(n.dex); ctx.globalAlpha *= 0.7; ctx.stroke(); ctx.globalAlpha = dim ? 0.15 : 1;
+      }
+    } else {
+      const g = ctx.createRadialGradient(n.x - n.r * 0.35, n.y - n.r * 0.4, n.r * 0.1, n.x, n.y, n.r);
+      g.addColorStop(0, d3.color(col).brighter(0.6).formatRgb());
+      g.addColorStop(1, d3.color(col).darker(0.5).formatRgb());
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = g; ctx.fill();
+      // ring: venue identity when coloring by price
+      if (state.colorBy !== 'dex' && n.r > 6) { ctx.lineWidth = 1.5; ctx.strokeStyle = getDexColor(n.dex); ctx.globalAlpha *= 0.55; ctx.stroke(); ctx.globalAlpha = dim ? 0.15 : 1; }
+    }
+    // liquidity change flash
+    if (n.flash > 0) {
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2);
+      ctx.strokeStyle = n.flashUp ? C.buy : C.sell; ctx.lineWidth = 3; ctx.globalAlpha = n.flash; ctx.stroke();
+      ctx.globalAlpha = dim ? 0.15 : 1;
+    }
+    if (n.flags.length && n.r > 4) {
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2);
+      ctx.setLineDash([4, 3]); ctx.strokeStyle = C.accent; ctx.lineWidth = 1.5; ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (state.selected === n || state.hover === n) {
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 1.5, 0, Math.PI * 2);
+      ctx.strokeStyle = state.selected === n ? C.accent : C.fg; ctx.lineWidth = state.selected === n ? 3 : 1.5; ctx.stroke();
+    }
+    // labels
+    if (n.r > 15) {
+      const fs = Math.max(10, Math.min(24, n.r * 0.36));
+      ctx.font = '700 ' + fs + 'px ' + css('--display');
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      let label = n.sym; const maxW = n.r * 1.7;
+      while (label.length > 2 && ctx.measureText(label).width > maxW) label = label.slice(0, -1);
+      if (label !== n.sym) label = label.slice(0, -1) + '…';
+      const showSub = n.r > 32;
+      if (img) {
+        // label sits on the shaded lower half of the logo
+        const lfs = Math.min(fs, n.r * 0.3);
+        ctx.font = '700 ' + lfs + 'px ' + css('--display');
+        ctx.fillStyle = '#f4f6fb';
+        ctx.fillText(label, n.x, n.y + n.r * (showSub ? 0.4 : 0.52));
+        if (showSub) {
+          ctx.font = '500 ' + Math.max(9, Math.min(12, n.r * 0.16)) + 'px ' + css('--mono');
+          ctx.fillStyle = 'rgba(244,246,251,0.8)';
+          ctx.fillText(usd(n.liq), n.x, n.y + n.r * 0.66);
+        }
+      } else {
+        ctx.fillStyle = 'rgba(9,13,22,0.88)';
+        ctx.fillText(label, n.x, n.y - (showSub ? fs * 0.42 : 0));
+        if (showSub) {
+          const fs2 = Math.max(9, Math.min(13, n.r * 0.19));
+          ctx.font = '500 ' + fs2 + 'px ' + css('--mono');
+          ctx.fillStyle = 'rgba(9,13,22,0.72)';
+          ctx.fillText(usd(n.liq), n.x, n.y + fs * 0.62);
+        }
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- pointer ----------
+function hit(x, y) {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (n.r > 1 && (n.x - x) ** 2 + (n.y - y) ** 2 <= n.r * n.r) return n;
+  }
+  return null;
+}
+const tip = $('tip');
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect(); const x = e.clientX - r.left, y = e.clientY - r.top;
+  const n = hit(x, y); state.hover = n;
+  stage.classList.toggle('pointer', !!n);
+  if (!n) { tip.hidden = true; return; }
+  const tx = n.buys5 + n.sells5;
+  tip.innerHTML = '<h3>' + logoHtml(n) + esc(n.name) + '</h3><dl class="kv">' +
+    '<dt>DEX</dt><dd>' + esc(prettyDex(n.dex)) + '</dd>' +
+    '<dt>Liquidity</dt><dd>' + usd(n.liq) + '</dd>' +
+    '<dt>Market cap</dt><dd>' + usd(n.mcap || NaN) + '</dd>' +
+    '<dt>24h volume</dt><dd>' + usd(n.vol24) + '</dd>' +
+    (n.progress != null ? '<dt>Curve</dt><dd>' + (n.graduated ? 'graduated' : (n.progress * 100).toFixed(1) + '%') + '</dd>' : '') +
+    '<dt>5m trades</dt><dd><span class="up">' + n.buys5 + '</span> / <span class="down">' + n.sells5 + '</span></dd>' +
+    '<dt>Δ 5m · 1h</dt><dd><span class="' + cls(n.chg.m5) + '">' + pct(n.chg.m5) + '</span> · <span class="' + cls(n.chg.h1) + '">' + pct(n.chg.h1) + '</span></dd>' +
+    '<dt>Δ 24h</dt><dd class="' + cls(n.chg.h24) + '">' + pct(n.chg.h24) + '</dd></dl>' +
+    (n.flags.length ? '<div class="tip-flags">⚠ ' + n.flags.map(esc).join('<br>⚠ ') + '</div>' : '');
+  tip.hidden = false;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(W - tw - 8, x + 14) + 'px';
+  tip.style.top = Math.min(H - th - 8, y + 14) + 'px';
+});
+cv.addEventListener('mouseleave', () => { state.hover = null; tip.hidden = true; });
+cv.addEventListener('click', e => {
+  const r = cv.getBoundingClientRect();
+  const n = hit(e.clientX - r.left, e.clientY - r.top);
+  select(n && n !== state.selected ? n : n ? state.selected : null);
+});
+
+// ---------- copy contract address ----------
+const ICON_COPY = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5A1.5 1.5 0 0 0 9 1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h.5"/></svg>';
+const ICON_DONE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>';
+const copiedUntil = new Map(); // mint -> time the "copied" tick stops showing
+function copyButtonHtml(mint, sym) {
+  if (!mint) return '';
+  const done = (copiedUntil.get(mint) || 0) > Date.now();
+  return '<button type="button" class="copy' + (done ? ' done' : '') + '" data-ca="' + esc(mint) + '" title="' + (done ? 'Copied' : 'Copy contract address') + '" aria-label="Copy ' + esc(sym || 'token') + ' contract address">' + (done ? ICON_DONE : ICON_COPY) + '</button>';
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch {
+    // fallback for browsers or frames that refuse the async clipboard
+    const ta = Object.assign(document.createElement('textarea'), { value: text });
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch {}
+    ta.remove(); return ok;
+  }
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('.copy[data-ca]');
+  if (!b) return;
+  e.stopPropagation(); // don't also open the row
+  const mint = b.dataset.ca;
+  if (!(await copyText(mint))) { b.title = 'Copy failed: select the address in the pool panel instead'; return; }
+  copiedUntil.set(mint, Date.now() + 1500);
+  for (const x of document.querySelectorAll('.copy[data-ca="' + CSS.escape(mint) + '"]')) { x.classList.add('done'); x.innerHTML = ICON_DONE; x.title = 'Copied'; }
+  setTimeout(() => {
+    for (const x of document.querySelectorAll('.copy[data-ca="' + CSS.escape(mint) + '"]')) { x.classList.remove('done'); x.innerHTML = ICON_COPY; x.title = 'Copy contract address'; }
+  }, 1500);
+}, true);
+
+// ---------- hide coins ----------
+const ICON_HIDE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 2l12 12"/><path d="M6.6 3.6A6.8 6.8 0 0 1 8 3.5c3.6 0 6 4.5 6 4.5a11 11 0 0 1-1.9 2.4M4.2 4.9C2.8 6 2 8 2 8s2.4 4.5 6 4.5c1 0 1.9-.3 2.7-.7"/><path d="M6.6 6.7a2 2 0 0 0 2.8 2.7"/></svg>';
+function hideButtonHtml(n) {
+  if (!n.mint) return '';
+  return '<button type="button" class="copy" data-hide="' + esc(n.mint) + '" data-sym="' + esc(n.sym || '') + '" title="Hide this coin" aria-label="Hide ' + esc(n.sym || 'coin') + '">' + ICON_HIDE + '</button>';
+}
+function setHidden(list) {
+  state.hidden = list.slice(-500);
+  hiddenMints = new Set(state.hidden.map(h => h.mint));
+  if (state.selected && hiddenMints.has(state.selected.mint)) select(null);
+  renderHiddenBar(); renderList(); renderPanels(); layoutClusters(); saveSettings();
+}
+function hideCoin(mint, sym) { if (!hiddenMints.has(mint)) setHidden(state.hidden.concat({ mint, sym })); }
+function unhideCoin(mint) { setHidden(state.hidden.filter(h => h.mint !== mint)); }
+function renderHiddenBar() {
+  const n = state.hidden.length;
+  $('hiddenBar').hidden = !n;
+  if (!n) return;
+  $('hbLabel').textContent = n + (n === 1 ? ' coin hidden' : ' coins hidden');
+  const shown = state.hidden.slice(-12).reverse(); // most recently hidden first
+  $('hbChips').innerHTML = shown.map(h => '<span class="hb-chip" title="' + esc(h.mint) + '"><span>' + esc(h.sym || short(h.mint)) + '</span>' +
+    '<button type="button" data-unhide="' + esc(h.mint) + '" aria-label="Unhide ' + esc(h.sym || 'coin') + '">×</button></span>').join('') +
+    (n > shown.length ? '<span class="hb-more">+' + (n - shown.length) + ' more</span>' : '');
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-hide]');
+  if (!b) return;
+  e.stopPropagation(); // don't also open the row
+  hideCoin(b.dataset.hide, b.dataset.sym);
+}, true);
+$('hbChips').addEventListener('click', e => { const b = e.target.closest('[data-unhide]'); if (b) unhideCoin(b.dataset.unhide); });
+$('hbClear').addEventListener('click', () => setHidden([]));
+
+// ---------- list view ----------
+// Every column the list can show. `init` builds a cell once and `set` refreshes it in place,
+// so rows (and their logo images) survive the 4x/second refresh.
+const mcapOf = n => n.mcap || NaN;
+const barCell = color => '<div class="cellbar"><span></span><div class="mini"><div' + (color ? ' style="background:' + color + '"' : '') + '></div></div></div>';
+// show a value and tint it green/red for a moment when it moves
+function tickCell(td, v, text) {
+  const now = performance.now();
+  if (td._v !== undefined && isFinite(v) && isFinite(td._v) && v !== td._v) { td._dir = v > td._v ? 'tick-up' : 'tick-down'; td._until = now + 900; }
+  td._v = v;
+  td.textContent = text;
+  td.className = now < (td._until || 0) ? td._dir : '';
+}
+const changeCol = (label, k) => ({ label, sort: n => n.chg[k], set: (td, n) => { td.textContent = pct(n.chg[k]); td.className = cls(n.chg[k]); } });
+const COLUMNS = {
+  // position in the selected list as ranked by the server (trend score, 24h volume, newest, ...)
+  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n) => { td.textContent = n.rank ?? '–'; } },
+  token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
+    init: td => { td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="warn-mark" hidden>⚠</span><span class="ca-slot"></span><span class="hide-slot"></span></div>'; },
+    set: (td, n) => {
+      const key = (state.logos && n.icon) || '';
+      if (td.dataset.icon !== key) { td.dataset.icon = key; td.querySelector('.lg').innerHTML = logoHtml(n); }
+      td.querySelector('b').textContent = n.sym;
+      td.querySelector('small').textContent = '/ ' + n.quote;
+      const wm = td.querySelector('.warn-mark');
+      wm.hidden = !n.flags.length;
+      if (n.flags.length) { wm.title = n.flags.join('\n'); wm.setAttribute('aria-label', 'Red flags: ' + n.flags.join('; ')); }
+      const slot = td.querySelector('.ca-slot');
+      if (slot.dataset.ca !== (n.mint || '')) { slot.dataset.ca = n.mint || ''; slot.innerHTML = copyButtonHtml(n.mint, n.sym); }
+      const hs = td.querySelector('.hide-slot');
+      if (hs.dataset.ca !== (n.mint || '')) { hs.dataset.ca = n.mint || ''; hs.innerHTML = hideButtonHtml(n); }
+    } },
+  mcap: { label: 'Market cap', sort: mcapOf, set: (td, n) => { const v = mcapOf(n); tickCell(td, v, usdFine(v)); } },
+  venue: { label: 'Venue', align: 'l', sort: n => prettyDex(n.dex).toLowerCase(),
+    init: td => { td.innerHTML = '<span class="venue"><i></i><span></span></span>'; },
+    set: (td, n) => { td.querySelector('i').style.background = getDexColor(n.dex); td.querySelector('span span').textContent = prettyDex(n.dex); } },
+  liq: { label: 'Liquidity', sort: n => n.liq, init: td => { td.innerHTML = barCell(); },
+    set: (td, n, ctx) => {
+      td.querySelector('span').textContent = usd(n.liq);
+      const b = td.querySelector('.mini > div');
+      b.style.width = (100 * n.liq / ctx.maxLiq).toFixed(1) + '%'; b.style.background = getDexColor(n.dex);
+    } },
+  price: { label: 'Price', sort: n => n.price, set: (td, n) => { tickCell(td, n.price, price(n.price)); } },
+  m5: changeCol('Δ 5m', 'm5'),
+  h1: changeCol('Δ 1h', 'h1'),
+  h24: changeCol('Δ 24h', 'h24'),
+  vol5: { label: 'Vol 5m', sort: n => n.vol5, set: (td, n) => { td.textContent = usd(n.vol5); } },
+  vol1: { label: 'Vol 1h', sort: n => n.vol1, set: (td, n) => { td.textContent = usd(n.vol1); } },
+  vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { td.textContent = usd(n.vol24); } },
+  traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { td.textContent = n.traders5 ? n.traders5 : '–'; } },
+  score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { td.textContent = n.score != null ? n.score.toFixed(1) : '–'; } },
+  tx: { label: 'Buys / sells 5m', sort: n => n.buys5 + n.sells5,
+    init: td => { td.innerHTML = '<div class="cellbar"><span></span><div class="mini split"><div></div></div></div>'; },
+    set: (td, n) => {
+      const tx = n.buys5 + n.sells5;
+      td.querySelector('span').innerHTML = '<span class="up">' + n.buys5 + '</span> / <span class="down">' + n.sells5 + '</span>';
+      td.querySelector('.mini > div').style.width = (tx ? 100 * n.buys5 / tx : 50) + '%';
+    } },
+  progress: { label: 'Curve', sort: n => n.progress ?? -1, init: td => { td.innerHTML = barCell('var(--accent)'); },
+    set: (td, n) => {
+      td.querySelector('span').textContent = n.progress == null ? '–' : n.graduated ? 'graduated' : (n.progress * 100).toFixed(1) + '%';
+      td.querySelector('.mini').style.visibility = n.progress == null ? 'hidden' : 'visible';
+      td.querySelector('.mini > div').style.width = ((n.progress || 0) * 100).toFixed(1) + '%';
+    } },
+  coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity, set: (td, n) => { td.textContent = n.born ? ago(n.born) : '–'; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; } },
+};
+const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
+function normalizeColumns(saved) {
+  const out = [], seen = new Set();
+  for (const c of Array.isArray(saved) ? saved : []) {
+    if (!c || !COLUMNS[c.key] || seen.has(c.key)) continue;
+    seen.add(c.key); out.push({ key: c.key, on: COLUMNS[c.key].locked ? true : !!c.on });
+  }
+  if (!out.length) for (const k of DEFAULT_COLUMNS) { seen.add(k); out.push({ key: k, on: true }); }
+  // default columns introduced after these settings were saved: switch them on, next to their default neighbour
+  DEFAULT_COLUMNS.forEach((k, i) => {
+    if (seen.has(k)) return;
+    seen.add(k);
+    const after = out.findIndex(c => c.key === DEFAULT_COLUMNS[i - 1]);
+    out.splice(after + 1, 0, { key: k, on: true });
+  });
+  for (const k of Object.keys(COLUMNS)) if (!seen.has(k)) out.push({ key: k, on: false });
+  return out;
+}
+state.columns = normalizeColumns(null);
+const shownColumns = () => state.columns.filter(c => c.on).map(c => c.key);
+
+const listRows = new Map();
+function renderHead() {
+  $('listHead').innerHTML = shownColumns().map(k => {
+    const c = COLUMNS[k];
+    const sort = state.sort.key === k ? ' aria-sort="' + (state.sort.dir > 0 ? 'ascending' : 'descending') + '"' : '';
+    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.label) + '</button></th>';
+  }).join('');
+}
+function rebuildList() {
+  for (const tr of listRows.values()) tr.remove();
+  listRows.clear();
+  renderHead(); renderList();
+}
+function sortValue(n, k) {
+  const v = (COLUMNS[k] || COLUMNS.liq).sort(n);
+  return typeof v === 'number' && !isFinite(v) ? -Infinity : v;
+}
+function makeRow(cols) {
+  const tr = document.createElement('tr');
+  tr.tabIndex = 0;
+  for (const k of cols) {
+    const td = document.createElement('td');
+    if (COLUMNS[k].align) td.className = COLUMNS[k].align;
+    COLUMNS[k].init?.(td);
+    tr.appendChild(td);
+  }
+  tr.addEventListener('click', () => select(byId.get(tr.dataset.id)));
+  tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(byId.get(tr.dataset.id)); } });
+  return tr;
+}
+function updateRow(tr, n, cols, ctx) {
+  tr.dataset.id = n.id;
+  cols.forEach((k, i) => COLUMNS[k].set(tr.children[i], n, ctx));
+  tr.setAttribute('aria-selected', state.selected === n ? 'true' : 'false');
+  // tint the row briefly when a swap lands, or when liquidity moves between updates
+  const age = n.lastTrade ? ctx.now - n.lastTrade.at : Infinity;
+  if (age < 700) tr.style.backgroundColor = (n.lastTrade.b ? 'rgba(46,211,163,' : 'rgba(255,100,112,') + (0.12 * (1 - age / 700)).toFixed(3) + ')';
+  else if (n.flash > 0) tr.style.backgroundColor = (n.flashUp ? 'rgba(46,211,163,' : 'rgba(255,100,112,') + (0.22 * n.flash).toFixed(3) + ')';
+  else tr.style.backgroundColor = '';
+}
+function renderList() {
+  if (state.view !== 'list') return;
+  const body = $('listBody'), cols = shownColumns();
+  const { key, dir } = state.sort;
+  const list = nodes.filter(n => visible(n) && matches(n))
+    .sort((a, b) => { const x = sortValue(a, key), y = sortValue(b, key); return (x < y ? -1 : x > y ? 1 : 0) * dir || b.liq - a.liq; });
+  const ctx = { maxLiq: d3.max(list, d => d.liq) || 1, now: performance.now() }, seen = new Set();
+  list.forEach((n, i) => {
+    let tr = listRows.get(n.id);
+    if (!tr) { tr = makeRow(cols); listRows.set(n.id, tr); }
+    updateRow(tr, n, cols, ctx);
+    if (body.children[i] !== tr) body.insertBefore(tr, body.children[i] || null);
+    seen.add(n.id);
+  });
+  for (const [id, tr] of listRows) if (!seen.has(id)) { tr.remove(); listRows.delete(id); }
+  $('listEmpty').hidden = list.length > 0 || !nodes.length;
+}
+$('listHead').addEventListener('click', e => {
+  const th = e.target.closest('th'); if (!th) return;
+  const k = th.dataset.k;
+  state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (COLUMNS[k].align === 'l' || k === 'rank' ? 1 : -1) };
+  renderHead(); renderList(); saveSettings();
+});
+setInterval(renderList, 250);
+
+// ---------- column editor ----------
+function renderColPanel(focus) {
+  const last = state.columns.length - 1;
+  $('colList').innerHTML = state.columns.map((c, i) => {
+    const col = COLUMNS[c.key];
+    return '<li draggable="true" data-k="' + c.key + '"><span class="grip" aria-hidden="true">⋮⋮</span>' +
+      '<label><input type="checkbox" id="col-' + c.key + '"' + (c.on ? ' checked' : '') + (col.locked ? ' disabled' : '') + '> ' + esc(col.label) + '</label>' +
+      '<button type="button" class="mv" data-d="-1" aria-label="Move ' + esc(col.label) + ' up"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+      '<button type="button" class="mv" data-d="1" aria-label="Move ' + esc(col.label) + ' down"' + (i === last ? ' disabled' : '') + '>↓</button></li>';
+  }).join('');
+  if (focus) $('colList').querySelector('li[data-k="' + focus.k + '"] .mv[data-d="' + focus.d + '"]:not(:disabled)')?.focus();
+}
+function columnsChanged(focus) { renderColPanel(focus); rebuildList(); saveSettings(); }
+function moveColumn(k, to) {
+  const from = state.columns.findIndex(c => c.key === k);
+  if (from < 0) return;
+  const [c] = state.columns.splice(from, 1);
+  state.columns.splice(Math.max(0, Math.min(state.columns.length, to > from ? to - 1 : to)), 0, c);
+}
+function openColPanel(open) {
+  $('colPanel').hidden = !open;
+  $('colBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) { renderColPanel(); $('colList').querySelector('input:not(:disabled)')?.focus(); }
+}
+$('colBtn').addEventListener('click', () => openColPanel($('colPanel').hidden));
+$('colDone').addEventListener('click', () => { openColPanel(false); $('colBtn').focus(); });
+$('colReset').addEventListener('click', () => { state.columns = normalizeColumns(null); columnsChanged(); });
+$('colList').addEventListener('change', e => {
+  const k = e.target.closest('li')?.dataset.k, c = state.columns.find(c => c.key === k);
+  if (c && !COLUMNS[k].locked) { c.on = e.target.checked; rebuildList(); saveSettings(); }
+});
+$('colList').addEventListener('click', e => {
+  const b = e.target.closest('.mv'); if (!b) return;
+  const k = b.closest('li').dataset.k, d = +b.dataset.d, i = state.columns.findIndex(c => c.key === k);
+  moveColumn(k, d > 0 ? i + 2 : i - 1);
+  columnsChanged({ k, d });
+});
+let dragKey = null;
+$('colList').addEventListener('dragstart', e => {
+  const li = e.target.closest('li'); if (!li) return;
+  dragKey = li.dataset.k; li.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragKey);
+});
+$('colList').addEventListener('dragover', e => {
+  const li = e.target.closest('li'); if (!li || !dragKey) return;
+  e.preventDefault();
+  const after = e.clientY > li.getBoundingClientRect().top + li.offsetHeight / 2;
+  for (const x of $('colList').children) x.classList.remove('drop-before', 'drop-after');
+  li.classList.add(after ? 'drop-after' : 'drop-before');
+});
+$('colList').addEventListener('drop', e => {
+  const li = e.target.closest('li'); if (!li || !dragKey) return;
+  e.preventDefault();
+  const after = li.classList.contains('drop-after');
+  const to = state.columns.findIndex(c => c.key === li.dataset.k) + (after ? 1 : 0);
+  moveColumn(dragKey, to);
+  dragKey = null; columnsChanged();
+});
+$('colList').addEventListener('dragend', () => { dragKey = null; for (const x of $('colList').children) x.classList.remove('dragging', 'drop-before', 'drop-after'); });
+document.addEventListener('click', e => {
+  if (!$('colPanel').hidden && !e.target.closest('#colPanel') && !e.target.closest('#colBtn')) openColPanel(false);
+});
+
+// ---------- saved settings (this browser only) ----------
+const SETTINGS_KEY = 'solana-liquidity-bubbles:settings:v1';
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      view: state.view, list: state.list, colorBy: state.colorBy, size: state.size,
+      minLiq: state.minLiq, group: state.group, logos: state.logos, genuine: state.genuine, hidden: state.hidden, sort: state.sort, columns: state.columns,
+    }));
+  } catch {}
+}
+function restoreSettings() {
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch {}
+  const oneOf = (v, ok, d) => ok.includes(v) ? v : d;
+  state.view = oneOf(s.view, ['map', 'list'], state.view);
+  state.list = oneOf(s.list, Object.keys(LISTS), state.list);
+  state.colorBy = oneOf(s.colorBy, ['m5', 'h1', 'h24', 'progress', 'dex'], state.colorBy);
+  state.size = oneOf(s.size, ['log', 'sqrt', 'area'], state.size);
+  state.minLiq = oneOf(s.minLiq, [0, 10000, 50000, 250000, 1000000], state.minLiq);
+  if (typeof s.group === 'boolean') state.group = s.group;
+  if (typeof s.logos === 'boolean') state.logos = s.logos;
+  if (typeof s.genuine === 'boolean') state.genuine = s.genuine;
+  if (Array.isArray(s.hidden)) {
+    state.hidden = s.hidden.filter(h => h && typeof h.mint === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(h.mint))
+      .map(h => ({ mint: h.mint, sym: String(h.sym || '').slice(0, 40) })).slice(-500);
+    hiddenMints = new Set(state.hidden.map(h => h.mint));
+  }
+  if (s.sort && COLUMNS[s.sort.key] && (s.sort.dir === 1 || s.sort.dir === -1)) state.sort = { key: s.sort.key, dir: s.sort.dir };
+  state.columns = normalizeColumns(s.columns);
+}
+
+// ---------- side panels ----------
+function renderStatus() {
+  const dot = $('dot'), t = $('statusText');
+  if (state.error) { dot.className = 'dot err'; t.textContent = state.error; return; }
+  const s = stream.stats;
+  dot.className = s && !s.connected ? 'dot warn' : 'dot';
+  const lag = lagSamples.length ? [...lagSamples].sort((a, b) => a - b)[Math.floor(lagSamples.length / 2)] : null;
+  t.textContent = !s ? 'Connected, warming up…' :
+    (s.connected ? 'Streaming from chain' : 'Chain websocket reconnecting') + ' · ' + s.tradesPerSec.toLocaleString() + ' swaps/s · ' + s.pools.toLocaleString() + ' pools' +
+    (lag != null ? ' · ' + lag + ' ms to screen' : '');
+  t.title = s?.latency?.chainMs ? 'Block time to server: median ' + s.latency.chainMs.p50 + ' ms (block times are whole seconds, so ±1s)' : '';
+}
+function renderPanels() {
+  const vis = nodes.filter(visible);
+  const label = LISTS[state.list];
+  $('setLabel').textContent = label + ' · ' + vis.length + ' on map';
+  $('sLiq').textContent = usd(d3.sum(vis, d => d.liq));
+  $('sVolLabel').textContent = '24h volume';
+  $('sVol').textContent = usd(d3.sum(vis, d => d.vol24));
+  $('sVol5').textContent = usd(d3.sum(vis, d => d.vol5));
+  const b = d3.sum(vis, d => d.buys5), s = d3.sum(vis, d => d.sells5);
+  $('sTx5').textContent = (b + s).toLocaleString();
+  $('sRatio').style.width = (b + s ? (100 * b / (b + s)) : 50) + '%';
+  $('sBuys').textContent = 'buys ' + b.toLocaleString();
+  $('sSells').textContent = 'sells ' + s.toLocaleString();
+  renderBoard(); renderDex(vis); renderLegend(); renderPool(true);
+}
+function renderBoard() {
+  const vis = nodes.filter(visible).sort((a, b) => b.liq - a.liq).slice(0, 10);
+  const el = $('board'); el.innerHTML = '';
+  vis.forEach((n, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('aria-current', state.selected === n ? 'true' : 'false');
+    btn.innerHTML = '<span class="rk">' + (i + 1) + '</span><span class="nm">' + esc(n.sym) + ' <small>/ ' + esc(n.quote) + ' · ' + esc(prettyDex(n.dex)) + '</small></span>' +
+      '<span>' + usd(n.liq) + '</span><span class="' + cls(n.chg.h1) + '">' + pct(n.chg.h1) + '</span>';
+    btn.addEventListener('click', () => select(n));
+    el.appendChild(btn);
+  });
+  if (!vis.length) el.innerHTML = '<div class="empty">No pools match this filter.</div>';
+}
+function renderDex(vis) {
+  const tot = d3.rollups(vis, v => d3.sum(v, d => d.liq), d => d.dex).sort((a, b) => b[1] - a[1]);
+  const max = tot.length ? tot[0][1] : 1;
+  $('dexbars').innerHTML = tot.map(([dex, liq]) =>
+    '<div class="dexbar"><span>' + esc(prettyDex(dex)) + '</span><div class="bar"><div style="width:' + (100 * liq / max) + '%;background:' + getDexColor(dex) + '"></div></div><span class="v">' + usd(liq) + '</span></div>').join('');
+}
+function renderLegend() {
+  const el = $('legend');
+  if (state.colorBy === 'progress') {
+    el.innerHTML = '<span>Fill: bonding-curve progress · grey: AMM pool</span><div class="grad" style="background:linear-gradient(90deg,var(--neutral),var(--accent))"></div><div class="grad-labels"><span>0%</span><span>graduated</span></div>';
+    return;
+  }
+  if (state.colorBy === 'dex') {
+    const dexes = [...new Set(nodes.filter(visible).map(n => n.dex))];
+    el.innerHTML = '<span>Fill: venue · size: liquidity</span><div class="dex-keys">' +
+      dexes.map(d => '<span><i style="background:' + getDexColor(d) + '"></i>' + esc(prettyDex(d)) + '</span>').join('') + '</div>';
+  } else {
+    const r = COLOR_RANGE[state.colorBy], lbl = { m5: '5m', h1: '1h', h24: '24h' }[state.colorBy] + (state.colorBy !== 'm5' ? ' (tracked)' : '');
+    el.innerHTML = '<span>Fill: price change ' + lbl + ' · ring: venue · size: liquidity' + ({ sqrt: ' (compressed √)', log: ' (log scale)', area: '' })[state.size] + '</span><div class="grad"></div>' +
+      '<div class="grad-labels"><span>≤ −' + r + '%</span><span>0</span><span>≥ +' + r + '%</span></div>';
+  }
+}
+function renderPool(refreshOnly) {
+  const el = $('poolPanel'), n = state.selected;
+  if (!n) { el.innerHTML = '<div class="empty">Click a bubble to open the pool and stream its swaps.</div>'; return; }
+  const tx = n.buys5 + n.sells5;
+  el.innerHTML =
+    '<div class="pool-head"><div><div class="label">Open pool</div><h2>' + logoHtml(n) + '<span>' + esc(n.name) + '</span></h2></div>' +
+    '<button type="button" class="close" id="closePool" aria-label="Close pool">✕</button></div>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap"><span class="chip" style="border-color:' + getDexColor(n.dex) + '">' + esc(prettyDex(n.dex)) + '</span>' +
+    (n.born ? '<span class="chip" title="Created ' + esc(new Date(n.born).toLocaleString()) + '">age ' + ago(n.born) + '</span>' : '') + '</div>' +
+    (n.flags.length ? '<div class="flags"><b>⚠ Red flags</b><ul>' + n.flags.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>' : '') +
+    (n.mint ? '<div class="ca"><span class="lbl">CA</span><code>' + esc(n.mint) + '</code>' + copyButtonHtml(n.mint, n.sym) + '</div>' : '') +
+    '<dl class="kv">' +
+    '<dt>Price</dt><dd id="pvPrice">' + price(n.price) + '</dd>' +
+    '<dt>Liquidity</dt><dd id="pvLiq">' + usdFine(n.liq) + '</dd>' +
+    '<dt>Market cap</dt><dd id="pvMcap">' + usdFine(n.mcap || NaN) + '</dd>' +
+    '<dt>24h volume</dt><dd>' + usd(n.vol24) + '</dd>' +
+    '<dt>1h volume</dt><dd>' + usd(n.vol1) + '</dd>' +
+    '<dt>5m volume</dt><dd>' + usd(n.vol5) + '</dd>' +
+    (n.traders5 ? '<dt>Traders 5m</dt><dd>' + n.traders5 + '</dd>' : '') +
+    (n.score != null ? '<dt>Trend score</dt><dd>' + n.score.toFixed(1) + '</dd>' : '') + '</dl>' +
+    (n.progress != null ? '<div class="progress"><span>' + (n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation') + '</span><div class="bar"><div style="width:' + (n.progress * 100).toFixed(1) + '%"></div></div></div>' : '') +
+    '<div class="changes">' + ['m5', 'h1', 'h24'].map(k => '<div><small>Δ ' + { m5: '5m', h1: '1h', h24: '24h' }[k] + '</small><span class="' + cls(n.chg[k]) + '">' + pct(n.chg[k]) + '</span></div>').join('') + '</div>' +
+    '<div><div class="ratio"><div style="width:' + (tx ? 100 * n.buys5 / tx : 50) + '%"></div></div>' +
+    '<div class="ratio-labels"><span class="up">5m buys ' + n.buys5 + '</span><span class="down">sells ' + n.sells5 + '</span></div></div>' +
+    '<div class="links">' +
+      (n.program === 'pump' ? '<a href="https://pump.fun/coin/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Pump.fun ↗</a>' : '') +
+      '<a href="https://dexscreener.com/solana/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">DexScreener ↗</a>' +
+      '<a href="https://solscan.io/token/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Solscan ↗</a></div>' +
+    '<div class="label">Live swaps</div><div class="tape" id="tape"><div class="empty">Loading swaps…</div></div>';
+  $('closePool').addEventListener('click', () => select(null));
+  if (tradeFor === n.addr) renderTape(refreshOnly);
+}
+function updatePoolValues(n) {
+  if (state.selected !== n) return;
+  for (const [id, v, text] of [['pvPrice', n.price, price(n.price)], ['pvLiq', n.liq, usdFine(n.liq)], ['pvMcap', n.mcap || NaN, usdFine(n.mcap || NaN)]]) {
+    const el = $(id); if (el) tickCell(el, v, text);
+  }
+}
+function renderTape(quiet) {
+  const el = $('tape'); if (!el) return;
+  if (!tradeRows.length) { el.innerHTML = '<div class="empty">No recent swaps.</div>'; return; }
+  el.innerHTML = tradeRows.map(t => {
+    const buy = t.kind === 'buy';
+    const ts = new Date(t.block_timestamp);
+    return '<div class="tape-row' + (t.isNew && !quiet ? ' new' : '') + '"><span class="t">' + ts.toLocaleTimeString([], { hour12: false }) + '</span>' +
+      '<span class="side ' + (buy ? 'up' : 'down') + '">' + (buy ? 'BUY' : 'SELL') + '</span>' +
+      '<a href="https://solscan.io/tx/' + encodeURIComponent(t.tx_hash) + '" target="_blank" rel="noopener" title="View transaction">' + esc(short(t.tx_from_address) || 'tx ' + short(t.tx_hash)) + '</a>' +
+      '<span class="usd ' + (buy ? 'up' : 'down') + '">' + usd(+t.volume_in_usd) + '</span></div>';
+  }).join('');
+}
+
+// ---------- controls ----------
+function segment(id, fn) {
+  $(id).addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    for (const x of $(id).querySelectorAll('button')) x.setAttribute('aria-pressed', x === b ? 'true' : 'false');
+    fn(b.dataset.v);
+  });
+}
+function applyListUi() {
+  $('boardLabel').textContent = 'Largest pools on the map';
+  renderLegend();
+}
+segment('srcSeg', v => {
+  if (v === state.list) return;
+  state.list = v; select(null);
+  streamConfig(); // the server answers with the new list right away
+  applyListUi(); renderPanels();
+});
+function setView(v) {
+  state.view = v;
+  const list = v === 'list';
+  // map-only controls: colour, layout and size have no effect on the table
+  $('listView').hidden = !list; cv.hidden = list; $('legend').hidden = list; $('groupSeg').hidden = list;
+  $('sizeMode').closest('label').hidden = list; $('colorBy').closest('label').hidden = list;
+  $('colBtn').hidden = !list;
+  if (!list) openColPanel(false);
+  tip.hidden = true;
+  if (list) renderList();
+}
+segment('viewSeg', setView);
+function syncControls() {
+  const press = (id, v) => { for (const b of $(id).querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.v === String(v) ? 'true' : 'false'); };
+  press('srcSeg', state.list); press('viewSeg', state.view); press('groupSeg', state.group ? '1' : '0');
+  $('colorBy').value = state.colorBy; $('sizeMode').value = state.size;
+  $('minLiq').value = String(state.minLiq); $('logos').checked = state.logos; $('genuine').checked = state.genuine;
+}
+// every header control change is remembered in this browser
+for (const type of ['click', 'change']) document.querySelector('header').addEventListener(type, () => setTimeout(saveSettings));
+$('genuine').addEventListener('change', e => { state.genuine = e.target.checked; streamConfig(); });
+$('logos').addEventListener('change', e => { state.logos = e.target.checked; renderList(); renderPool(true); });
+$('sizeMode').addEventListener('change', e => { state.size = e.target.value; layoutClusters(); renderLegend(); });
+segment('groupSeg', v => { state.group = v === '1'; layoutClusters(); sim.alpha(0.8); });
+$('colorBy').addEventListener('change', e => { state.colorBy = e.target.value; renderLegend(); });
+$('minLiq').addEventListener('change', e => { state.minLiq = +e.target.value; streamConfig(); layoutClusters(); renderPanels(); });
+$('q').addEventListener('input', e => { state.query = e.target.value.trim(); });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (!$('colPanel').hidden) { openColPanel(false); $('colBtn').focus(); } else select(null);
+});
+
+// ---------- boot ----------
+restoreSettings(); syncControls(); renderHead(); renderHiddenBar(); setView(state.view);
+resize(); applyListUi();
+requestAnimationFrame(frame);
+setInterval(() => {
+  if (state.group) layoutClusters(); // pools grow, shrink and leave between data updates
+  renderStatus();
+}, 1000);
+streamConnect();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "solana-launchpad-stream",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted real-time stream of Solana launchpad trades decoded straight from chain logs.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bs58": "6.0.0",
+    "ws": "8.18.0"
+  }
+}
