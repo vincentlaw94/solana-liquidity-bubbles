@@ -10,7 +10,8 @@
 //      BUNDLER_DB=0 to turn off the isitbundled.com bundler-wallet flag (bundler-wallets.json),
 //      BUNDLER_REFRESH=0 to use the hardcoded list without refreshing it on start,
 //      BUNDLE_DETECT=0 to turn off this server's own launch-bundle detector (Jito + block-order fallback),
-//      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start
+//      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start,
+//      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -23,6 +24,7 @@ import { loadBundlerWallets, syncBundlerWallets } from './lib/bundlers.js';
 import { createJito, createBundleDetector } from './lib/bundles.js';
 import { createFundingTracer } from './lib/funding.js';
 import { createBackfill } from './lib/backfill.js';
+import { createSnapshot } from './lib/snapshot.js';
 import { createImageProxy } from './lib/images.js';
 import { createRpc, createFailoverRpc, patient, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
@@ -110,6 +112,35 @@ const launchBundles = createBundleDetector({
 });
 const backfill = BUNDLES_ON && process.env.BACKFILL !== '0' ? createBackfill({ rpc: patient(rpc), detector: launchBundles, log }) : null;
 const market = new Market({ accounts, meta, prices, emit: broadcast, bundlers, launchBundles, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
+
+// ---- snapshot: restore the last run's state before the feed starts, save it every minute and on shutdown ----
+const snapshot = process.env.SNAPSHOT !== '0' ? createSnapshot({ file: path.join(DATA_DIR, 'snapshot.json.gz'), log }) : null;
+const snap = snapshot?.load();
+if (snap) {
+  const pools = market.restore(snap.pools), launches = launchBundles.restore(snap.launches);
+  meta.restore(snap.meta);
+  for (const p of market.pools.values()) if (!meta.get(p.mint)?.icon) meta.request(p.mint);
+  log(`snapshot from ${Math.round((Date.now() - snap.at) / 1000)}s ago restored: ${pools} pools, ${launches} launches being followed`);
+}
+function saveSnapshot() {
+  if (!snapshot) return;
+  const mints = [];
+  for (const p of market.pools.values()) if (p.ready) mints.push(p.mint, p.quoteMint);
+  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump() });
+}
+setInterval(saveSnapshot, 60e3).unref();
+// Ctrl+C, a closed terminal window, or a kill: save, then exit (the wallet DB, funding cache and Helius usage
+// counter save themselves on exit)
+let stopping = false;
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(sig, () => {
+    if (stopping) return;
+    stopping = true;
+    log('stopping (' + sig + '): saving snapshot');
+    saveSnapshot();
+    process.exit(0);
+  });
+}
 
 // ---- ingest ----
 const started = Date.now();
@@ -279,7 +310,7 @@ function stats() {
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
-    launchBundles: launchBundles.stats(), backfill: backfill?.stats() || null,
+    launchBundles: launchBundles.stats(), backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },

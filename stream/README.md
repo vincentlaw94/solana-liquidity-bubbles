@@ -105,6 +105,7 @@ venue goes quiet, re-check its event layout first.
 | `BUNDLE_DETECT` | on | `0` turns off the launch-bundle detector (see Launch bundles) |
 | `FUNDING` | on | `0` skips tracing how launch wallets were funded |
 | `BACKFILL` | on | `0` skips rebuilding launches that happened before the server started |
+| `SNAPSHOT` | on | `0` starts empty every time instead of restoring the last run (see Snapshot) |
 
 Without LaserStream, the free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
 rate-limits the follow-up HTTP calls. In practice:
@@ -293,6 +294,22 @@ In a 4-minute live run on the public websocket (October 2026), the detector foll
 minute and checked each about 20s after launch, with no Jito rate limiting. That's close to the 2 requests a
 second it allows itself, so at busier times checks queue up. On one coin its result matched isitbundled.com
 exactly: 17% bundled, the same 5 wallets and percentages, 100% sold.
+
+## Snapshot
+
+The server's state lives in memory, and is saved to `data/snapshot.json.gz` every minute and when it stops (Ctrl+C,
+a closed terminal window, or a kill signal). On start, the snapshot is restored before the live feed connects:
+
+- **Pools:** each pool's details (mints, decimals, creator, launch time, supply, authorities, peak reserve) and its
+  per-minute and per-hour volume buckets, so 1h/24h volume and Top volume carry on.
+- **Token info:** names, logos, links and holder counts of those pools.
+- **Bundle detector:** the launches it's following, with their launch-slot buys, bundles found, insider holdings and
+  check/funding progress. A check or trace cut off mid-way runs again.
+
+Not kept: the 5-minute swap window and the live tapes, which are stale within minutes anyway. Buckets carry their own
+time, so anything past 24 hours drops out as usual, and pools quiet for 30 minutes are cleaned up as before. Swaps
+made while the server was off are missed, so a long stop shows as a gap in the volume figures. A snapshot over a day
+old is ignored. In a test run, 1,195 pools and 89 followed launches came to 200 KB, saved in 26 ms.
 
 ## Coin images
 

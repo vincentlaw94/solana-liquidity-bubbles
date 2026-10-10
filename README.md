@@ -54,7 +54,8 @@ how to add another launchpad.
 
 ## Limits
 
-- All state is in memory, so a restart resets the 1h/24h figures.
+- State is kept in memory and saved to `stream/data/snapshot.json.gz` every minute and on Ctrl+C, so a restart picks up
+  the 1h/24h figures and bundle results where they were. Swaps made while the server is off are missed.
 - On the free public RPC, swaps arrive about 2 seconds after their block, and Meteora DBC swaps are
   sampled rather than complete. LaserStream removes the sampling and should cut the delay; its real-world
   latency hasn't been measured here yet (that needs a live key).

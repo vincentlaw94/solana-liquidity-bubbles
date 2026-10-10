@@ -41,23 +41,32 @@ function dbcLabel(launchpad) {
 }
 
 export class Market {
+  // pool fields a snapshot keeps (see dump)
+  static KEEP = ['id', 'program', 'platform', 'mint', 'quoteMint', 'baseDec', 'quoteDec', 'quoteRes', 'price', 'progress', 'fundTarget',
+    'graduated', 'successor', 'firstSeen', 'lastTs', 'lastEventAt', 'created', 'createdName', 'creator', 'baseSupply', 'quoteSupply',
+    'baseAuth', 'quoteAuth', 'peakQuoteRes', 'mins', 'hours'];
+
   constructor({ accounts, meta, prices, emit, bundlers = null, launchBundles = null, pumpswapAll = false }) {
     // bundlers: isitbundled.com's wallet list; launchBundles: this server's own launch-bundle detector (lib/bundles.js)
     Object.assign(this, { accounts, meta, prices, emit, bundlers, launchBundles, pumpswapAll });
     this.pools = new Map();
     this.outbox = [];
     this.counts = { trades: 0, unresolvedDrops: 0 };
-    setInterval(() => this.evict(), 60e3);
+    setInterval(() => this.evict(), 60e3).unref?.();
+  }
+
+  static blank(id, program) {
+    return { id, program, platform: null, mint: null, quoteMint: null, baseDec: null, quoteDec: null, ready: false, pending: [],
+      quoteRes: 0, price: 0, progress: null, fundTarget: null, graduated: false, firstSeen: Date.now(), lastTs: 0, lastEventAt: Date.now(),
+      // 5-minute window as an array with a moving head, plus running totals kept in step with it
+      w5: [], w5h: 0, buys: 0, sells: 0, vol5: 0, wallets: new Map(), // wallet -> { q, nb, ns }
+      mins: [], vol60: 0, hours: [], vol24: 0, tape: [] };
   }
 
   pool(id, program) {
     let p = this.pools.get(id);
     if (!p) {
-      p = { id, program, platform: null, mint: null, quoteMint: null, baseDec: null, quoteDec: null, ready: false, pending: [],
-            quoteRes: 0, price: 0, progress: null, fundTarget: null, graduated: false, firstSeen: Date.now(), lastTs: 0, lastEventAt: Date.now(),
-            // 5-minute window as an array with a moving head, plus running totals kept in step with it
-            w5: [], w5h: 0, buys: 0, sells: 0, vol5: 0, wallets: new Map(), // wallet -> { q, nb, ns }
-            mins: [], vol60: 0, hours: [], vol24: 0, tape: [] };
+      p = Market.blank(id, program);
       if (program === 'pump') Object.assign(p, { mint: id.slice(5), quoteMint: SOL, baseDec: 6, quoteDec: 9, baseSupply: PUMP_SUPPLY, ready: true });
       this.pools.set(id, p);
       // PumpSwap has a long tail of near-dead pools: only spend RPC on ones that keep trading
@@ -347,6 +356,33 @@ export class Market {
     const flip = MAJORS.has(p.mint) && !MAJORS.has(p.quoteMint);
     const v = this.value(p, t.px, t.r);
     return { p: p.id, t: t.t, b: (t.b !== flip) ? 1 : 0, u: this.usd(p, t.q), q: t.q, x: t.x, w: t.w, s: t.s, sl: t.sl, ct: t.ct, pr: v.price, mc: v.mcap, lq: v.liq };
+  }
+
+  // ---- snapshot (lib/snapshot.js): what a restart should keep ----
+  // Each ready pool's details and its 1-minute / 1-hour volume buckets. The 5-minute swap window, wallets and
+  // tape are left out: they're stale within minutes. Buckets carry their own time, so old ones age out as usual.
+  dump() {
+    const out = [];
+    for (const p of this.pools.values()) {
+      if (!p.ready) continue;
+      const o = {};
+      for (const k of Market.KEEP) if (p[k] != null) o[k] = p[k];
+      out.push(o);
+    }
+    return out;
+  }
+  restore(list) {
+    let n = 0;
+    for (const o of list || []) {
+      if (!o?.id || this.pools.has(o.id)) continue;
+      const p = Object.assign(Market.blank(o.id, o.program), o, { ready: true });
+      p.vol60 = p.mins.reduce((t, b) => t + b.q, 0);
+      p.vol24 = p.hours.reduce((t, b) => t + b.q, 0);
+      this.pools.set(p.id, p);
+      this.prices.track(p.quoteMint);
+      n++;
+    }
+    return n;
   }
 
   drain() {
