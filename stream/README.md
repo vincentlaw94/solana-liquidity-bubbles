@@ -172,10 +172,12 @@ If that wallet is in isitbundled.com's Wallet DB ("every wallet caught bundling"
 next to its name and a "Bundler deployer" note in the pool panel. This doesn't count toward the Genuine only
 filter, so flagged coins stay visible.
 
-The list (about 64,000 wallets, 1,279 pages) comes from isitbundled.com's public API at one page every ~1.2s.
-It's cached in `data/bundler-wallets.json` (git-ignored) and refreshed daily (`BUNDLER_REFRESH_HOURS`), and
-`BUNDLER_DB=0` turns it off. Wallets found during a sync are used straight away. `/api/stats` →
-`bundlerWallets` shows sync progress, and `/api/token?mint=` shows a coin's deployer.
+The list is hardcoded in `bundler-wallets.json` (63,949 wallets as of 2026-10-10, one per line as
+`[address, launches, realized PnL in SOL]`). The server only reads that file and never contacts isitbundled.com.
+To refresh it, run `npm run update-bundlers`. It downloads the list again through the site's public API,
+one page every ~1.2s (about 30 minutes), resumes if interrupted, and rewrites the file so the diff shows what
+changed. `BUNDLER_DB=0` turns the flag off. `/api/stats` → `bundlerWallets` shows the count and date, and
+`/api/token?mint=` shows a coin's deployer.
 
 ## Coin images
 
