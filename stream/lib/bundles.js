@@ -419,6 +419,29 @@ export function createBundleDetector({ jito, rpc = null, funding = null, known =
   const find = id => launches.get(id) || byMint.get(id) || launches.get('pump:' + id);
   return {
     onLaunch, onTrade, adopt, save,
+    // snapshot: launches being followed, so a restart keeps their results (Maps and Sets as arrays)
+    dump: () => [...launches.values()].map(L => {
+      const { summary, dirty, groups, linked, txs, wallets, ...rest } = L;
+      return { ...rest, nextCheck: Number.isFinite(L.nextCheck) ? L.nextCheck : null,
+        txs: [...txs].map(([sig, t]) => [sig, { slot: t.slot, wallets: [...t.wallets] }]),
+        wallets: [...wallets].map(([w, r]) => [w, { ...r, sigs: [...r.sigs] }]) };
+    }),
+    restore(list) {
+      let n = 0;
+      for (const o of list || []) {
+        if (!o?.key || launches.has(o.key)) continue;
+        const L = { ...o, dirty: true, summary: null,
+          txs: new Map(o.txs.map(([sig, t]) => [sig, { slot: t.slot, wallets: new Set(t.wallets) }])),
+          wallets: new Map(o.wallets.map(([w, r]) => [w, { ...r, sigs: new Set(r.sigs) }])),
+          // a finished check stays finished; one cut off mid-way runs again; a trace cut off mid-way resumes
+          nextCheck: o.nextCheck == null ? Infinity : Math.min(o.nextCheck, Date.now()),
+          fundingState: o.fundingState === 'tracing' ? 'queued' : o.fundingState };
+        launches.set(L.key, L);
+        if (L.mint) byMint.set(L.mint, L);
+        n++;
+      }
+      return n;
+    },
     knows: mint => !!(find(mint) || archiveByMint.has(mint)),
     prioritize(mints) { priority = new Set(mints); },
     // compact fields for a list row, or null when this server didn't see the launch

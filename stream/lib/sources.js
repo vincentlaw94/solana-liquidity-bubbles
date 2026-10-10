@@ -305,6 +305,9 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
     set: merge,
     request,
     requestLinks,
+    // snapshot: the cached info of the given mints, and putting it back after a restart
+    dump: ids => [...new Set(ids)].filter(id => meta.has(id)).map(id => [id, meta.get(id)]),
+    restore: entries => { for (const [id, m] of entries || []) if (!meta.has(id)) meta.set(id, m); },
     refreshStats,
     // a launch event's metadata link: try it shortly (IPFS uploads need a moment to propagate)
     setUri(id, uri) {
