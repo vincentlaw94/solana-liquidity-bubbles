@@ -177,14 +177,8 @@ table.pools td, .kv dd { transition: color .5s; }
 .ctl.check input { margin: 0; accent-color: var(--accent); }
 #listView { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
 #listView .list-scroll { flex: 1; min-height: 0; overflow: auto; }
-.hidden-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; }
-.hb-label { color: var(--muted); }
-.hb-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; min-width: 0; }
-.hb-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--raise); max-width: 160px; }
-.hb-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hb-chip button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px; font-size: 13px; line-height: 1; border-radius: 50%; }
-.hb-chip button:hover, .hb-chip button:focus-visible { color: var(--fg); background: var(--line); }
-.hb-more { color: var(--muted); align-self: center; }
+#hiddenBtn { display: inline-flex; align-items: center; gap: 6px; }
+#hiddenBtn svg { width: 14px; height: 14px; color: var(--muted); }
 table.pools { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
 table.pools th { position: sticky; top: 0; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line); text-align: right; padding: 0; }
 table.pools th button { all: unset; display: block; box-sizing: border-box; width: 100%; padding: 9px 12px; cursor: pointer; color: var(--muted);
@@ -280,6 +274,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       <button type="button" data-v="0" aria-pressed="false">Swarm</button>
       <button type="button" data-v="1" aria-pressed="true">By venue</button>
     </div>
+    <button type="button" class="btn" id="hiddenBtn" hidden></button>
     <button type="button" class="btn" id="colBtn" aria-expanded="false" aria-controls="colPanel" hidden>Columns</button>
     <label class="ctl check" for="genuine" title="Hide pools with rug, wash-trading or honeypot red flags"><input type="checkbox" id="genuine" checked> Genuine only</label>
     <label class="ctl check" for="logos"><input type="checkbox" id="logos" checked> Logos</label>
@@ -302,11 +297,6 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       </div>
     </div>
     <div id="listView" hidden>
-      <div id="hiddenBar" class="hidden-bar" hidden>
-        <span class="hb-label" id="hbLabel"></span>
-        <span class="hb-chips" id="hbChips"></span>
-        <button type="button" class="btn" id="hbClear">Unhide all</button>
-      </div>
       <div class="list-scroll">
         <table class="pools">
           <thead><tr id="listHead"></tr></thead>
@@ -887,19 +877,17 @@ function setHidden(list) {
   state.hidden = list.slice(-500);
   hiddenMints = new Set(state.hidden.map(h => h.mint));
   if (state.selected && hiddenMints.has(state.selected.mint)) select(null);
-  renderHiddenBar(); renderList(); renderPanels(); layoutClusters(); saveSettings();
+  renderHiddenBtn(); renderList(); renderPanels(); layoutClusters(); saveSettings();
 }
 function hideCoin(mint, sym) { if (!hiddenMints.has(mint)) setHidden(state.hidden.concat({ mint, sym })); }
-function unhideCoin(mint) { setHidden(state.hidden.filter(h => h.mint !== mint)); }
-function renderHiddenBar() {
-  const n = state.hidden.length;
-  $('hiddenBar').hidden = !n;
+// one header button: shows how many coins are hidden, and unhides them all when clicked
+function renderHiddenBtn() {
+  const n = state.hidden.length, b = $('hiddenBtn');
+  b.hidden = !n;
   if (!n) return;
-  $('hbLabel').textContent = n + (n === 1 ? ' coin hidden' : ' coins hidden');
-  const shown = state.hidden.slice(-12).reverse(); // most recently hidden first
-  $('hbChips').innerHTML = shown.map(h => '<span class="hb-chip" title="' + esc(h.mint) + '"><span>' + esc(h.sym || short(h.mint)) + '</span>' +
-    '<button type="button" data-unhide="' + esc(h.mint) + '" aria-label="Unhide ' + esc(h.sym || 'coin') + '">×</button></span>').join('') +
-    (n > shown.length ? '<span class="hb-more">+' + (n - shown.length) + ' more</span>' : '');
+  b.innerHTML = ICON_HIDE + '<span>' + n + ' hidden</span>';
+  b.title = 'Unhide ' + (n === 1 ? 'the hidden coin' : 'all ' + n + ' hidden coins');
+  b.setAttribute('aria-label', b.title);
 }
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-hide]');
@@ -907,8 +895,7 @@ document.addEventListener('click', e => {
   e.stopPropagation(); // don't also open the row
   hideCoin(b.dataset.hide, b.dataset.sym);
 }, true);
-$('hbChips').addEventListener('click', e => { const b = e.target.closest('[data-unhide]'); if (b) unhideCoin(b.dataset.unhide); });
-$('hbClear').addEventListener('click', () => setHidden([]));
+$('hiddenBtn').addEventListener('click', () => setHidden([]));
 
 // ---------- list view ----------
 // Every column the list can show. `init` builds a cell once and `set` refreshes it in place,
@@ -1321,7 +1308,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---------- boot ----------
-restoreSettings(); syncControls(); renderHead(); renderHiddenBar(); setView(state.view);
+restoreSettings(); syncControls(); renderHead(); renderHiddenBtn(); setView(state.view);
 resize(); applyListUi();
 requestAnimationFrame(frame);
 setInterval(() => {
