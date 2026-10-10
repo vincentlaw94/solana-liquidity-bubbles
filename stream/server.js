@@ -1,8 +1,10 @@
 // Self-hosted Solana launchpad stream.
 //   chain feed (LaserStream gRPC, or RPC websocket logs) -> decode -> market state -> WebSocket fan-out to dashboards
-// Env: LASERSTREAM_API_KEY (or HELIUS_API_KEY) switches the live feed to Helius LaserStream gRPC;
+// Env: LASERSTREAM_API_KEY (or HELIUS_API_KEY): a Helius key. If it has LaserStream access the live feed
+//        uses LaserStream gRPC, otherwise the public websocket (re-checked every 6h). Account lookups use
+//        Helius RPC first, within HELIUS_DAILY_CALLS (default 40000/day), falling back to the public RPC.
 //      LASERSTREAM_ENDPOINT (default Newark), LASERSTREAM_COMMITMENT (PROCESSED | CONFIRMED)
-//      RPC_HTTP, RPC_WS (default: Helius RPC when a key is set, else Solana public mainnet), PORT (8787),
+//      RPC_HTTP, RPC_WS (default: Solana public mainnet), PORT (8787),
 //      RPC_RPS, RPC_METHOD_RPS, DBC_TX_PER_SEC (2, websocket mode only),
 //      PUMPSWAP_ALL=1 to show every PumpSwap pool (default: only tokens that graduated from a launchpad)
 //      BUNDLER_DB=0 to skip the isitbundled.com bundler-wallet list, BUNDLER_REFRESH_HOURS (24)
@@ -12,17 +14,22 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent } from './lib/decode.js';
-import { createLaserStream } from './lib/laserstream.js';
+import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
 import { createBundlerDb } from './lib/bundlers.js';
-import { createRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
+import { createImageProxy } from './lib/images.js';
+import { createRpc, createFailoverRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
 
 const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
 const LASER_ENDPOINT = process.env.LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com';
 const LASER_COMMITMENT = (process.env.LASERSTREAM_COMMITMENT || 'PROCESSED').toUpperCase();
-// with a Helius key, account lookups go to Helius RPC too (far higher limits than the public endpoint)
-const RPC_HTTP = process.env.RPC_HTTP || (LASER_KEY ? 'https://mainnet.helius-rpc.com/?api-key=' + LASER_KEY : 'https://api.mainnet-beta.solana.com');
+const RPC_HTTP = process.env.RPC_HTTP || 'https://api.mainnet-beta.solana.com';
+// The websocket feed stays on the public endpoint unless set: Helius bills websocket data by volume, and
+// this feed (~3.9 TB/month) would use up a free allowance within hours.
 const RPC_WS = process.env.RPC_WS || RPC_HTTP.replace(/^http/, 'ws');
+const HELIUS_RPC = LASER_KEY && !process.env.RPC_HTTP ? 'https://mainnet.helius-rpc.com/?api-key=' + LASER_KEY : null;
+const HELIUS_DAILY_CALLS = +process.env.HELIUS_DAILY_CALLS || 40000; // ~1M credits over 24 days at 1 credit/call
+const log = s => console.log(new Date().toISOString(), s);
 const PORT = +process.env.PORT || 8787;
 const DBC_TX_PER_SEC = +process.env.DBC_TX_PER_SEC || 2;
 const RANK_MS = +process.env.RANK_MS || 500; // how often lists, ranks and 5m/1h/24h stats are recomputed
@@ -32,9 +39,18 @@ const SUBSCRIBED = PROGRAMS;
 const DASHBOARD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.html');
 
 // Defaults fit the free public RPC; with a paid endpoint raise RPC_RPS / RPC_METHOD_RPS / DBC_TX_PER_SEC.
-const rpc = createRpc(RPC_HTTP, { rps: +process.env.RPC_RPS || (LASER_KEY ? 20 : 5), methodRps: +process.env.RPC_METHOD_RPS || (LASER_KEY ? 10 : 2.5) });
+const publicRpc = createRpc(RPC_HTTP, { rps: +process.env.RPC_RPS || 5, methodRps: +process.env.RPC_METHOD_RPS || 2.5 });
+// With a Helius key: account lookups (small, frequent, latency-sensitive) go to Helius first, within a daily
+// budget so a free allowance lasts the whole cycle; heavy getTransaction calls stay on the public RPC.
+const rpc = HELIUS_RPC
+  ? createFailoverRpc({
+      primary: createRpc(HELIUS_RPC, { rps: 8, methodRps: 6 }), fallback: publicRpc,
+      primaryMethods: ['getMultipleAccounts'], dailyBudget: HELIUS_DAILY_CALLS, log,
+    })
+  : publicRpc;
 const accounts = createAccountLoader(rpc);
-const meta = createTokenMeta();
+const images = createImageProxy();
+const meta = createTokenMeta({ metadataImage: images.metadataImage });
 const prices = createPrices();
 const clients = new Set();
 // performance counters, reported under /api/stats -> perf
@@ -84,11 +100,14 @@ function ingestLogs(logs, sig, slot, signer, only) {
   }
 }
 
-const chain = LASER_KEY
-  // LaserStream: whole transactions, failed ones filtered at the source, DBC events inline
-  ? createLaserStream({
+// ---- live feed: LaserStream when the key has access, otherwise the public websocket ----
+const feed = { type: null, chain: { connected: false, reconnects: 0 }, note: null, checkedAt: null };
+const LASER_RECHECK_MS = 6 * 3600e3;
+function startLaser() {
+  return createLaserStream({
       endpoint: LASER_ENDPOINT, apiKey: LASER_KEY, programs: SUBSCRIBED, commitment: LASER_COMMITMENT,
-      onStatus: s => console.log(new Date().toISOString(), 'chain', s),
+      onStatus: s => log('chain ' + s),
+      onAccessDenied: why => useWebsocket('LaserStream access ended: ' + why),
       onTx(tx) {
         bump(counters.notifications, 'laserstream');
         ingestLogs(tx.logs, tx.sig, tx.slot, tx.signer);
@@ -98,12 +117,14 @@ const chain = LASER_KEY
           if (ev) emitEvent(ev, tx.sig, tx.slot, tx.signer);
         }
       },
-    })
-  // public/RPC websocket: program log subscriptions; DBC swaps need a follow-up getTransaction
-  : createLogStream({
+    });
+}
+// public/RPC websocket: program log subscriptions; DBC swaps need a follow-up getTransaction
+function startWebsocket() {
+  return createLogStream({
       url: RPC_WS,
       programs: SUBSCRIBED,
-      onStatus: s => console.log(new Date().toISOString(), 'chain', s),
+      onStatus: s => log('chain ' + s),
       onLogs(name, sig, logs, err, slot) {
         bump(counters.notifications, name);
         if (err) { bump(counters.failedTx, name); return; }
@@ -117,11 +138,38 @@ const chain = LASER_KEY
         ingestLogs(logs, sig, slot, null, PROGRAMS[name]);
       },
     });
+}
+function useLaser() {
+  if (feed.type === 'laserstream') return;
+  feed.chain.close?.();
+  Object.assign(feed, { type: 'laserstream', chain: startLaser(), note: null });
+  log('live feed: Helius LaserStream gRPC (' + new URL(LASER_ENDPOINT).host + ', ' + LASER_COMMITMENT + ')');
+}
+function useWebsocket(note) {
+  if (feed.type === 'rpc-websocket') { feed.note = note; return; }
+  feed.chain.close?.();
+  Object.assign(feed, { type: 'rpc-websocket', chain: startWebsocket(), note });
+  log('live feed: RPC websocket ' + RPC_WS.replace(/api-key=[^&]+/, 'api-key=***') + (note ? ' (' + note + ')' : ''));
+}
+// Check the key's LaserStream access at startup and every 6 hours while falling back,
+// so an upgraded plan (or a restored trial) switches over on its own.
+async function checkLaser() {
+  const r = await probeLaserStream({ endpoint: LASER_ENDPOINT, apiKey: LASER_KEY, programs: SUBSCRIBED });
+  feed.checkedAt = Date.now();
+  if (r.ok) useLaser();
+  else useWebsocket('LaserStream not available for this key: ' + (r.code ? r.code + ', ' : '') + r.details);
+}
+if (LASER_KEY) {
+  useWebsocket('checking LaserStream access'); // data flows while the check runs
+  checkLaser();
+  setInterval(() => { if (feed.type !== 'laserstream') checkLaser(); }, LASER_RECHECK_MS);
+} else useWebsocket(null);
 
 // Meteora DBC events live in inner instructions, so swaps are fetched as full transactions (rate-capped).
 // Logs arrive at "processed"; a transaction is only fetchable once confirmed, so wait a few seconds.
 const DBC_CONFIRM_MS = 1500; // usually confirmed by then; a null result is retried
-if (!LASER_KEY) setInterval(async () => {
+setInterval(async () => {
+  if (feed.type !== 'rpc-websocket') return; // LaserStream delivers DBC events inline
   if (rpc.busy('getTransaction') > 1000) return; // backed off after 429s: don't pile up requests
   let i = dbcQueue.length - 1;
   while (i >= 0 && Date.now() - dbcQueue[i].at < DBC_CONFIRM_MS) i--;
@@ -184,13 +232,16 @@ function stats() {
   }
   const tps = Object.entries(rate.perSec).filter(([k]) => k.endsWith(':trade')).reduce((s, [, v]) => s + v, 0);
   return {
-    uptime: Math.round((now - started) / 1000), connected: chain.connected, reconnects: chain.reconnects,
-    source: LASER_KEY ? { type: 'laserstream', endpoint: chain.endpoint, commitment: LASER_COMMITMENT, lastSlot: chain.lastSlot, transactions: chain.received }
-      : { type: 'rpc-websocket', endpoint: RPC_WS.replace(/api-key=[^&]+/, 'api-key=***') },
+    uptime: Math.round((now - started) / 1000), connected: feed.chain.connected, reconnects: feed.chain.reconnects,
+    source: feed.type === 'laserstream'
+      ? { type: 'laserstream', endpoint: feed.chain.endpoint, commitment: LASER_COMMITMENT, lastSlot: feed.chain.lastSlot, transactions: feed.chain.received }
+      : { type: 'rpc-websocket', endpoint: RPC_WS.replace(/api-key=[^&]+/, 'api-key=***'), note: feed.note,
+          laserstreamCheckedAt: feed.checkedAt, nextLaserstreamCheck: LASER_KEY && feed.checkedAt ? feed.checkedAt + LASER_RECHECK_MS : null },
     tradesPerSec: +tps.toFixed(1), perProgram: rate.perSec, pools: market.pools.size, trades: market.counts.trades,
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
+    images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
     rpc: rpc.stats, rpcUrl: RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***'),
     latency: {
@@ -292,6 +343,8 @@ function pushPools(c, reset) {
   const msg = snapshotFor(c, pools, reset);
   if (msg) sendTo(c, 'pools', msg);
 }
+// coins on any list that still have no image: look them up again (each coin backs off on its own schedule)
+setInterval(() => { for (const r of latestRows) if (!r.icon) meta.request(r.mint); }, 30000);
 // server stats change slowly and are bulky: their own message every 2s
 setInterval(() => { if (clients.size) broadcast({ type: 'stats', stats: stats() }); }, 2000);
 
@@ -333,6 +386,8 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/' || url.pathname === '/index.html') {
     try { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(await readFile(DASHBOARD)); }
     catch { res.writeHead(404).end('dashboard not found'); }
+  } else if (url.pathname === '/img') {
+    await images.handle(req, res, url);
   } else if (url.pathname === '/api/stats') {
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(stats()));
   } else if (url.pathname === '/api/token') {
@@ -399,6 +454,5 @@ wss.on('connection', ws => {
 
 server.listen(PORT, () => {
   console.log(`Launchpad stream on http://localhost:${PORT}  (ws://localhost:${PORT}/ws)`);
-  console.log(`Live feed: ${LASER_KEY ? 'Helius LaserStream gRPC (' + new URL(LASER_ENDPOINT).host + ', ' + LASER_COMMITMENT + ')' : 'RPC websocket ' + RPC_WS.replace(/api-key=[^&]+/, 'api-key=***')}`);
-  console.log(`RPC ${RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***')}`);
+  console.log(`RPC ${HELIUS_RPC ? 'Helius (account lookups, up to ' + HELIUS_DAILY_CALLS + ' calls/day) with fallback to ' : ''}${RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***')}`);
 });

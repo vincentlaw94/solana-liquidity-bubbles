@@ -25,9 +25,24 @@ Open http://localhost:8787. It needs Node 22.9 or newer.
 
 ### With Helius LaserStream (recommended)
 
-Copy `.env.example` to `.env` and set `LASERSTREAM_API_KEY` to your Helius API key (LaserStream mainnet needs
-a Helius plan that includes it). `npm start` reads `.env` automatically, and `.env` is git-ignored. The
-startup log then says `Live feed: Helius LaserStream gRPC (...)`.
+Copy `.env.example` to `.env` and set `LASERSTREAM_API_KEY` to your Helius API key. `npm start` reads `.env`
+automatically, and `.env` is git-ignored.
+
+**Any Helius key works, including a free one.** At startup the server checks whether the key has LaserStream
+mainnet access (Helius's Business plan or above, as of October 2026):
+
+- **With access:** the live feed is LaserStream.
+- **Without access** (e.g. `PERMISSION_DENIED: Unsupported plan type` on the free plan): it uses the public
+  websocket and checks again every 6 hours, so an upgraded plan switches over on its own.
+- **If access ends mid-run** (a trial expiring, say), it falls back to the public websocket within about a
+  second instead of retrying.
+- `/api/stats` → `source` shows the active feed and why.
+
+Any key also speeds up account lookups: they go to Helius RPC first, within `HELIUS_DAILY_CALLS` (default
+40,000 a day, which is about 1M credits over 24 days if each call costs 1 credit), and fall back to the public
+RPC when the budget is spent or Helius refuses (bad key, out of credits). Heavy `getTransaction` calls and the
+websocket feed stay on the public endpoint, because Helius bills websocket data by volume and this feed would
+use up a free allowance within hours. `/api/stats` → `rpc.failover` shows usage.
 
 What changes compared with the public RPC websocket:
 
@@ -72,13 +87,14 @@ venue goes quiet, re-check its event layout first.
 
 | Env var | Default | Notes |
 |---|---|---|
-| `LASERSTREAM_API_KEY` (or `HELIUS_API_KEY`) | none | Turns on the LaserStream gRPC feed |
+| `LASERSTREAM_API_KEY` (or `HELIUS_API_KEY`) | none | Helius key: LaserStream if the plan allows it, Helius RPC for account lookups |
+| `HELIUS_DAILY_CALLS` | `40000` | Daily cap on Helius RPC calls before falling back to the public RPC |
 | `LASERSTREAM_ENDPOINT` | `https://laserstream-mainnet-ewr.helius-rpc.com` | Pick your closest region: `ewr`, `pitt`, `slc`, `lax`, `lon`, `ams`, `fra`, `tyo`, `sgp` |
 | `LASERSTREAM_COMMITMENT` | `PROCESSED` | `PROCESSED` is lowest latency; `CONFIRMED` is about 1s later but never shows a transaction that gets dropped |
-| `RPC_HTTP` | Helius RPC with a key, else `https://api.mainnet-beta.solana.com` | Account lookups (and the websocket feed without LaserStream) |
+| `RPC_HTTP` | `https://api.mainnet-beta.solana.com` | Public/fallback RPC. Setting it also turns off the Helius account-lookup routing |
 | `RPC_WS` | derived from `RPC_HTTP` | Websocket endpoint for `logsSubscribe` (only used without LaserStream) |
-| `RPC_RPS` | `20` with a Helius key, else `5` | Overall request budget per second |
-| `RPC_METHOD_RPS` | `10` with a Helius key, else `2.5` | Starting budget per RPC method; backs off on 429s |
+| `RPC_RPS` | `5` | Overall request budget per second for `RPC_HTTP` |
+| `RPC_METHOD_RPS` | `2.5` | Starting budget per RPC method; backs off on 429s |
 | `DBC_TX_PER_SEC` | `2` | Meteora DBC transactions fetched per second (only used without LaserStream) |
 | `PORT` | `8787` | HTTP + WebSocket port |
 
@@ -95,6 +111,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 
 - `GET /api/stats`: throughput, per-program decode rates, RPC usage, DBC sampling
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
+- `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
 - `GET /api/pools?list=trending|top|new&limit=100&minLiq=0&genuine=true`: a ranked pool list
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
@@ -153,6 +170,22 @@ The list (about 64,000 wallets, 1,279 pages) comes from isitbundled.com's public
 It's cached in `data/bundler-wallets.json` (git-ignored) and refreshed daily (`BUNDLER_REFRESH_HOURS`), and
 `BUNDLER_DB=0` turns it off. Wallets found during a sync are used straight away. `/api/stats` →
 `bundlerWallets` shows sync progress, and `/api/token?mint=` shows a coin's deployer.
+
+## Coin images
+
+- **Where image URLs come from:** Jupiter's token index. For pump.fun coins seen launching, the server also
+  reads the metadata link in the launch event and takes the image from there, which usually works before
+  Jupiter has indexed the coin.
+- **Retries:** coins on any list that still have no image are looked up again on a backing-off schedule
+  (20s, 1m, 2m, 5m, 10m, then every 30m).
+- **Proxy:** the dashboard loads every logo through `GET /img?u=<url>`. IPFS links are rewritten to gateways
+  that were fast and not rate-limited when tested in October 2026 (ipfs.filebase.io, pump.mypinata.cloud,
+  then 4everland.io and gateway.pinata.cloud). Two are tried at once and the fastest wins. ipfs.io, dweb.link,
+  w3s.link and nftstorage.link were answering 429 at the time.
+- **Caching:** images are cached in memory (64 MB) and served from our own origin, which also keeps the map's
+  canvas untainted. Failed logos are retried by the browser every 2 minutes.
+- **Safety:** the proxy only fetches public http(s) hosts, checked after DNS resolution and on every redirect,
+  accepts only image content types up to 1.5 MB, and serves images under a sandboxing CSP.
 
 ## Graduations
 

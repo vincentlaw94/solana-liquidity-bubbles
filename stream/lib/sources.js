@@ -27,7 +27,13 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
         await sleep(400 * 2 ** attempt);
         continue;
       }
+      if (res.status === 401 || res.status === 402 || res.status === 403) {
+        throw Object.assign(new Error('access refused (HTTP ' + res.status + ')'), { access: true });
+      }
       if (res.status === 429) {
+        // a provider saying "out of credits" also answers 429: that's not something waiting fixes
+        const text = await res.text().catch(() => '');
+        if (/credit|usage|plan|exceed|upgrade|quota/i.test(text)) throw Object.assign(new Error('out of credits: ' + text.slice(0, 120)), { access: true });
         stats.limited++;
         l.gap = Math.min(l.gap * 2, 20000);
         l.next = Date.now() + l.gap;
@@ -44,6 +50,43 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
   }
   call.stats = stats;
   call.busy = method => lane(method).next - Date.now(); // ms until this method's next free slot
+  return call;
+}
+
+// Two RPC endpoints: a preferred one (e.g. Helius with a free key) and a fallback (the public RPC).
+// The preferred one is used for `primaryMethods` while it has budget left today; it is skipped for an
+// hour after it refuses access or reports it's out of credits, and any call it fails is retried on the
+// fallback. `dailyBudget` caps calls per UTC day so a monthly credit allowance lasts the whole cycle.
+export function createFailoverRpc({ primary, fallback, primaryMethods = null, dailyBudget = Infinity, cooldownMs = 3600e3, log = () => {} }) {
+  const day = () => Math.floor(Date.now() / 86400e3);
+  const failover = { primaryMethods, dailyBudget, usedToday: 0, day: day(), downUntil: 0, reason: null, primaryCalls: 0, fallbackCalls: 0 };
+  const usePrimary = method => {
+    if (failover.day !== day()) { failover.day = day(); failover.usedToday = 0; }
+    return (!primaryMethods || primaryMethods.includes(method)) && Date.now() >= failover.downUntil && failover.usedToday < dailyBudget;
+  };
+  async function call(method, params) {
+    if (usePrimary(method)) {
+      failover.usedToday++; failover.primaryCalls++;
+      try { return await primary(method, params); }
+      catch (e) {
+        if (e.access) {
+          failover.downUntil = Date.now() + cooldownMs; failover.reason = e.message;
+          log(`preferred RPC unavailable (${e.message}); using the fallback for the next hour`);
+        }
+        // fall through: the same call is retried on the fallback
+      }
+    }
+    failover.fallbackCalls++;
+    return fallback(method, params);
+  }
+  call.busy = method => (usePrimary(method) ? primary : fallback).busy(method);
+  Object.defineProperty(call, 'stats', {
+    get: () => ({
+      calls: primary.stats.calls + fallback.stats.calls, errors: primary.stats.errors + fallback.stats.errors,
+      limited: primary.stats.limited + fallback.stats.limited, gaps: fallback.stats.gaps,
+      primary: primary.stats, fallback: fallback.stats, failover,
+    }),
+  });
   return call;
 }
 
@@ -76,7 +119,7 @@ export function createAccountLoader(rpc) {
 
 // One websocket, one logsSubscribe per program; reconnects with backoff and on silence.
 export function createLogStream({ url, programs, onLogs, onStatus }) {
-  let ws = null, lastMsg = 0, attempts = 0;
+  let ws = null, lastMsg = 0, attempts = 0, stopped = false, retryTimer = null;
   const state = { connected: false, reconnects: 0, since: 0 };
   function connect() {
     const subNames = new Map(), reqNames = new Map();
@@ -112,11 +155,13 @@ export function createLogStream({ url, programs, onLogs, onStatus }) {
     ws.onerror = () => {};
     ws.onclose = e => {
       state.connected = false; state.reconnects++;
+      if (stopped) return;
       onStatus?.('disconnected' + (e?.code ? ' (code ' + e.code + (e.reason ? ', ' + e.reason : '') + ')' : '') + ', retrying');
-      setTimeout(connect, Math.min(30000, 1000 * 2 ** attempts++));
+      retryTimer = setTimeout(connect, Math.min(30000, 1000 * 2 ** attempts++));
     };
   }
-  setInterval(() => { if (ws?.readyState === 1 && Date.now() - lastMsg > 30000) ws.close(); }, 10000);
+  const watchdog = setInterval(() => { if (ws?.readyState === 1 && Date.now() - lastMsg > 30000) ws.close(); }, 10000);
+  state.close = () => { stopped = true; clearTimeout(retryTimer); clearInterval(watchdog); ws?.close(); };
   connect();
   return state;
 }
@@ -140,35 +185,70 @@ const jupiter = (() => {
 })();
 export const jupiterStats = jupiter.stats;
 
-// Token symbol/name/icon/launchpad/creation time from Jupiter's token index, 100 mints per request.
-export function createTokenMeta() {
-  const meta = new Map(), queue = new Set(), tries = new Map();
-  let running = false;
+// Token symbol/name/icon/launchpad/creation time from Jupiter's token index (100 mints per request), with
+// the coin's own launch metadata as the image fallback. Coins still missing an image are retried on a
+// backing-off schedule (20s, 1m, 2m, 5m, 10m, then every 30m) until one turns up.
+const IMAGE_RETRY = [20e3, 60e3, 120e3, 300e3, 600e3, 1800e3];
+export function createTokenMeta({ metadataImage } = {}) {
+  const meta = new Map(), queue = new Set();
+  const next = new Map(); // mint -> { n, at }: when it may be looked up again
+  const uris = new Map(); // mint -> metadata URI from its launch event
+  const uriQueue = [], uriBusy = new Set();
+  let uriActive = 0, running = false;
+  const merge = (id, m) => meta.set(id, { ...(meta.get(id) || {}), ...m });
+  const cap = (map, n) => { while (map.size > n) map.delete(map.keys().next().value); };
+
+  // the coin's own metadata JSON -> image, for coins Jupiter hasn't indexed yet or indexed without a logo
+  function fromUri(id) {
+    if (!metadataImage || !uris.has(id) || meta.get(id)?.icon || uriBusy.has(id)) return;
+    uriBusy.add(id); uriQueue.push(id); drain();
+  }
+  function drain() {
+    while (uriActive < 4 && uriQueue.length) {
+      const id = uriQueue.shift(); uriActive++;
+      metadataImage(uris.get(id))
+        .then(img => { if (img && !meta.get(id)?.icon) merge(id, { icon: img }); })
+        .finally(() => { uriActive--; uriBusy.delete(id); drain(); });
+    }
+  }
+
   setInterval(async () => {
     if (running || !queue.size || jupiter.busy() > 0) return;
     running = true;
     const ids = [...queue].slice(0, 100);
     ids.forEach(id => queue.delete(id));
     try {
-      const found = new Set();
       for (const t of await jupiter.get('https://lite-api.jup.ag/tokens/v2/search?query=' + ids.join(','))) {
-        found.add(t.id);
+        const cur = meta.get(t.id) || {};
         const born = Date.parse(t.firstPool?.createdAt || t.createdAt || '');
-        meta.set(t.id, { ...(meta.get(t.id) || {}), symbol: t.symbol, name: t.name, icon: t.icon || null, launchpad: t.launchpad || null, decimals: t.decimals, born: born || null });
+        merge(t.id, { symbol: t.symbol || cur.symbol, name: t.name || cur.name, icon: t.icon || cur.icon || null,
+          launchpad: t.launchpad || cur.launchpad || null, decimals: t.decimals, born: born || cur.born || null });
       }
-      // brand-new tokens take a little while to be indexed: retry a few times
-      for (const id of ids) if (!found.has(id)) {
-        const n = (tries.get(id) || 0) + 1; tries.set(id, n);
-        if (n < 4) setTimeout(() => queue.add(id), 20000 * n);
-      }
+      for (const id of ids) if (!meta.get(id)?.icon) fromUri(id);
     } catch { ids.forEach(id => queue.add(id)); }
     running = false;
   }, 500);
+
+  function request(id) {
+    if (!id || meta.get(id)?.icon || queue.has(id)) return;
+    const t = next.get(id) || { n: 0, at: 0 };
+    if (Date.now() < t.at) return;
+    t.at = Date.now() + IMAGE_RETRY[Math.min(t.n, IMAGE_RETRY.length - 1)]; t.n++;
+    next.set(id, t); cap(next, 100000);
+    queue.add(id);
+  }
   return {
     get: id => meta.get(id),
-    set: (id, m) => meta.set(id, { ...(meta.get(id) || {}), ...m }),
-    request: id => { if (id && !meta.get(id)?.symbol && !tries.has(id)) { tries.set(id, 0); queue.add(id); } },
+    set: merge,
+    request,
+    // a launch event's metadata link: try it shortly (IPFS uploads need a moment to propagate)
+    setUri(id, uri) {
+      if (!id || !uri || uris.has(id)) return;
+      uris.set(id, uri); cap(uris, 50000);
+      setTimeout(() => fromUri(id), 3000);
+    },
     size: () => meta.size,
+    stats: () => { let icons = 0; for (const m of meta.values()) if (m.icon) icons++; return { tokens: meta.size, withImage: icons, lookupQueue: queue.size, metadataLinks: uris.size }; },
   };
 }
 

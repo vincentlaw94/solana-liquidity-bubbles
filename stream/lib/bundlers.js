@@ -14,13 +14,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 export function createBundlerDb({ file, refreshHours = 24, gapMs = 1200, enabled = true, log = () => {} }) {
   let wallets = new Map(); // address -> { launches, pnl } (pnl: realized SOL, as reported by the site)
   const state = { source: 'isitbundled.com', count: 0, updatedAt: null, syncing: false, page: 0, pages: null, error: null };
+  let resume = null; // { nextPage, startedAt, wallets } from an interrupted sync
 
   async function load() {
     try {
       const j = JSON.parse(await readFile(file, 'utf8'));
       wallets = new Map(j.wallets.map(([a, launches, pnl]) => [a, { launches, pnl }]));
-      Object.assign(state, { count: wallets.size, updatedAt: j.updatedAt });
-      log(`bundler wallets: ${wallets.size} loaded from cache (${new Date(j.updatedAt).toISOString()})`);
+      Object.assign(state, { count: wallets.size, updatedAt: j.updatedAt || null });
+      // an interrupted sync less than a day old carries on from its next page instead of starting over
+      if (j.partial && Date.now() - j.partial.startedAt < refreshHours * 3600e3) resume = { ...j.partial, wallets: new Map(wallets) };
+      log(`bundler wallets: ${wallets.size} loaded from cache` + (resume ? ` (resuming sync at page ${resume.nextPage})` : ` (${new Date(j.updatedAt).toISOString()})`));
     } catch { /* no cache yet */ }
   }
 
@@ -38,12 +41,23 @@ export function createBundlerDb({ file, refreshHours = 24, gapMs = 1200, enabled
     }
   }
 
+  async function save(partial) {
+    await mkdir(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp';
+    await writeFile(tmp, JSON.stringify({ source: 'https://isitbundled.com/wallets', updatedAt: state.updatedAt,
+      partial: partial && { nextPage: partial.nextPage, startedAt: partial.startedAt },
+      wallets: [...(partial ? partial.wallets : wallets)].map(([a, i]) => [a, i.launches, i.pnl]) }));
+    await rename(tmp, file);
+  }
+
   async function sync() {
     if (state.syncing) return;
     Object.assign(state, { syncing: true, page: 0, error: null });
-    const next = new Map();
+    const from = resume?.nextPage || 1, startedAt = resume?.startedAt || Date.now();
+    const next = resume?.wallets || new Map();
+    resume = null;
     try {
-      for (let page = 1; ; page++) {
+      for (let page = from; ; page++) {
         const j = await fetchPage(page);
         state.page = page; state.pages = j.pages;
         for (const w of j.wallets || []) {
@@ -54,17 +68,16 @@ export function createBundlerDb({ file, refreshHours = 24, gapMs = 1200, enabled
         }
         state.count = wallets.size;
         if (page >= j.pages || !j.wallets?.length) break;
+        if (page % 50 === 0) await save({ nextPage: page + 1, startedAt, wallets: next }); // checkpoint
         await sleep(gapMs);
       }
       wallets = next; // drop wallets the site no longer lists
       Object.assign(state, { count: wallets.size, updatedAt: Date.now() });
-      await mkdir(path.dirname(file), { recursive: true });
-      const tmp = file + '.tmp';
-      await writeFile(tmp, JSON.stringify({ source: 'https://isitbundled.com/wallets', updatedAt: state.updatedAt, wallets: [...wallets].map(([a, i]) => [a, i.launches, i.pnl]) }));
-      await rename(tmp, file);
+      await save(null);
       log(`bundler wallets: synced ${wallets.size} from isitbundled.com`);
     } catch (e) {
       state.error = e.message;
+      resume = { nextPage: Math.max(from, state.page), startedAt, wallets: next }; // the next attempt picks up here
       log(`bundler wallets: sync stopped at page ${state.page}/${state.pages ?? '?'} (${e.message}); will retry later`);
     } finally {
       state.syncing = false;
@@ -74,8 +87,8 @@ export function createBundlerDb({ file, refreshHours = 24, gapMs = 1200, enabled
   if (enabled) {
     load().then(() => {
       const stale = () => !state.updatedAt || Date.now() - state.updatedAt > refreshHours * 3600e3;
-      if (stale()) sync();
-      setInterval(() => { if (stale()) sync(); }, 3600e3); // check hourly, sync when older than refreshHours
+      if (resume || stale()) sync();
+      setInterval(() => { if (resume || stale()) sync(); }, 3600e3); // hourly: resume a failed sync, or refresh a stale list
     });
   }
   return { get: addr => (addr ? wallets.get(addr) : undefined), state, sync };

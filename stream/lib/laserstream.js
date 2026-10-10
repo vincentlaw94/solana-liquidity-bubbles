@@ -51,10 +51,34 @@ export function parseUpdate(u) {
   return { sig: bs58.encode(info.signature), slot: Number(tu.slot), signer: key(0), logs: meta.logMessages || [], cpiEvents };
 }
 
-export function createLaserStream({ endpoint, apiKey, programs, commitment = 'PROCESSED', onTx, onStatus }) {
+// gRPC refusals that mean "this key/plan can't use LaserStream": retrying won't help
+const ACCESS_CODES = new Set([grpc.status.UNAUTHENTICATED, grpc.status.PERMISSION_DENIED]);
+
+function channel(endpoint) {
   const url = new URL(endpoint);
   const target = url.host.includes(':') ? url.host : url.host + ':' + (url.protocol === 'http:' ? 80 : 443);
-  const channelCreds = url.protocol === 'http:' ? grpc.credentials.createInsecure() : grpc.credentials.createSsl();
+  return { url, target, creds: url.protocol === 'http:' ? grpc.credentials.createInsecure() : grpc.credentials.createSsl() };
+}
+
+// Does this key have LaserStream access? Subscribes briefly and resolves on the first data or refusal.
+export function probeLaserStream({ endpoint, apiKey, programs, timeoutMs = 15000 }) {
+  return new Promise(resolve => {
+    const { target, creds } = channel(endpoint);
+    const client = new (geyserService())(target, creds);
+    const md = new grpc.Metadata(); md.add('x-token', apiKey);
+    const call = client.Subscribe(md);
+    let settled = false;
+    const done = r => { if (settled) return; settled = true; clearTimeout(timer); try { call.cancel(); } catch {} client.close(); resolve(r); };
+    const timer = setTimeout(() => done({ ok: false, access: false, details: 'no answer within ' + timeoutMs / 1000 + 's' }), timeoutMs);
+    call.on('data', u => { if (u.transaction || u.ping || u.pong) done({ ok: true }); });
+    call.on('error', e => done({ ok: false, access: ACCESS_CODES.has(e.code), code: grpc.status[e.code], details: e.details || e.message }));
+    call.write({ transactions: { probe: { vote: false, failed: false, accountInclude: Object.values(programs), accountExclude: [], accountRequired: [] } },
+      accounts: {}, slots: {}, transactionsStatus: {}, blocks: {}, blocksMeta: {}, entry: {}, accountsDataSlice: [], commitment: 'PROCESSED', ping: { id: 1 } });
+  });
+}
+
+export function createLaserStream({ endpoint, apiKey, programs, commitment = 'PROCESSED', onTx, onStatus, onAccessDenied }) {
+  const { url, target, creds: channelCreds } = channel(endpoint);
   const Service = geyserService();
   const client = new Service(target, channelCreds, {
     'grpc.max_receive_message_length': 64 * 1024 * 1024,
@@ -83,11 +107,13 @@ export function createLaserStream({ endpoint, apiKey, programs, commitment = 'PR
     const c = client.Subscribe(md);
     call = c;
     let ended = false;
-    const done = why => {
+    const done = (why, code) => {
       if (ended) return;
       ended = true;
       clearInterval(pinger);
       if (state.connected) { state.connected = false; state.reconnects++; }
+      // the key lost access (trial ended, plan changed): hand over instead of retrying forever
+      if (ACCESS_CODES.has(code) && onAccessDenied) { stopped = true; onAccessDenied(why); return; }
       onStatus?.('disconnected (' + why + '), retrying');
       if (!stopped) retryTimer = setTimeout(connect, Math.min(30000, 1000 * 2 ** attempts++));
     };
@@ -102,7 +128,7 @@ export function createLaserStream({ endpoint, apiKey, programs, commitment = 'PR
       if (tx.slot > state.lastSlot) state.lastSlot = tx.slot;
       onTx(tx);
     });
-    c.on('error', e => done(e.details || e.message));
+    c.on('error', e => done(e.details || e.message, e.code));
     c.on('end', () => done('stream ended'));
     // after a drop, resume from the last slot we saw so nothing in between is lost
     c.write(request(state.lastSlot || 0));

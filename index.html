@@ -485,6 +485,9 @@ function removeDead(force) {
 // ---------- self-hosted chain stream ----------
 const STREAM_URL = new URLSearchParams(location.search).get('stream') || ((location.port === '8787' ? 'ws://' + location.host : 'ws://localhost:8787') + '/ws');
 const stream = { ws: null, open: false, stats: null, retry: 0, timer: null };
+// coin logos load through the stream server's /img proxy (fast IPFS gateways, cached, same-origin)
+const IMG_BASE = location.port === '8787' ? '' : STREAM_URL.replace(/^ws/, 'http').replace(/\/ws$/, '');
+const imgSrc = u => IMG_BASE + '/img?u=' + encodeURIComponent(u);
 const feed = [];
 function streamSend(m) { if (stream.open) stream.ws.send(JSON.stringify(m)); }
 function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, minLiq: state.minLiq, genuine: state.genuine }); }
@@ -667,12 +670,13 @@ const logoCache = new Map();
 function logo(url) {
   if (!url || !state.logos) return null;
   let e = logoCache.get(url);
-  if (!e) {
+  // a logo that failed is tried again after 2 minutes (the server may have found it on another gateway by then)
+  if (!e || (e.failedAt && performance.now() - e.failedAt > 120000)) {
     e = { img: new Image(), ok: false };
     e.img.decoding = 'async';
-    e.img.referrerPolicy = 'no-referrer';
     e.img.onload = () => { e.ok = e.img.naturalWidth > 0; };
-    e.img.src = url;
+    e.img.onerror = () => { e.failedAt = performance.now(); };
+    e.img.src = imgSrc(url);
     logoCache.set(url, e);
   }
   return e.ok ? e.img : null;
@@ -682,7 +686,7 @@ function logoHtml(n, cls = 'logo') {
   const badge = '<span class="badge" style="background:' + getDexColor(n.dex) + '"' + (n.icon && state.logos ? ' hidden' : '') + '>' + letter + '</span>';
   if (!n.icon || !state.logos) return badge;
   // the lettered badge stands in if the logo fails to load
-  return '<img class="' + cls + '" src="' + esc(n.icon) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.hidden=true;this.nextElementSibling.hidden=false">' + badge;
+  return '<img class="' + cls + '" src="' + esc(imgSrc(n.icon)) + '" alt="" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">' + badge;
 }
 
 const toBuy = d3.interpolateRgb(C.neutral, C.buy), toSell = d3.interpolateRgb(C.neutral, C.sell), toAccent = d3.interpolateRgb(C.neutral, C.accent);
@@ -954,6 +958,14 @@ document.addEventListener('click', e => {
   hideCoin(b.dataset.hide, b.dataset.sym);
 }, true);
 $('hiddenBtn').addEventListener('click', () => setHidden([]));
+
+// logos that failed in the list or panel get another try every 2 minutes
+setInterval(() => {
+  for (const img of document.querySelectorAll('img.logo[hidden]')) {
+    img.hidden = false; img.nextElementSibling.hidden = true;
+    img.src = img.src.replace(/&r=\d+$/, '') + '&r=' + Date.now();
+  }
+}, 120000);
 
 // ---------- list view ----------
 // Every column the list can show. `init` builds a cell once and `set` refreshes it in place,

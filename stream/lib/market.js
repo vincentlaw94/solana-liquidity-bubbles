@@ -127,7 +127,7 @@ export class Market {
       // PumpSwap is mostly long-tail noise: only look a pool up once it has traded 10 times
       if (!p.ready && !p.resolving && p.pending.length >= (p.program === 'pumpswap' ? 10 : 3)) this.resolve(p);
     } else if (ev.kind === 'create') {
-      if (ev.mint) this.meta.set(ev.mint, { symbol: ev.symbol, name: ev.name });
+      if (ev.mint) { this.meta.set(ev.mint, { symbol: ev.symbol, name: ev.name }); this.meta.setUri?.(ev.mint, ev.uri); }
       const p = this.pool(ev.pool, ev.program);
       p.created = Date.now();
       p.createdName = { symbol: ev.symbol, name: ev.name };

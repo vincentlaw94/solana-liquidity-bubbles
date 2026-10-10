@@ -72,7 +72,7 @@ export function decodeLogEvent(program, b) {
       const s = str(b, a[1]); if (!s) return null;
       const u = str(b, s[1]); if (!u || u[1] + 32 > b.length) return null;
       const mint = pk(b, u[1]);
-      return { kind: 'create', program: 'pump', pool: 'pump:' + mint, mint, name: clean(a[0]), symbol: clean(s[0]) };
+      return { kind: 'create', program: 'pump', pool: 'pump:' + mint, mint, name: clean(a[0]), symbol: clean(s[0]), uri: u[0].trim().slice(0, 300) };
     }
     if (d === D.complete && b.length >= 72) {
       const mint = pk(b, 40);
