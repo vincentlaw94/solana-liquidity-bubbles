@@ -1,95 +1,82 @@
 // Known bundler wallets from isitbundled.com's Wallet DB ("every wallet caught bundling": Proxima operators,
 // launch-bundle wallets and the wallets they hand tokens to). Used to flag coins whose deployer is one of them.
 //
-// The list comes from the site's public JSON API (/api/db/top, 50 wallets a page), fetched gently: one page
-// every ~1.2s, backing off on errors, refreshed once a day. It is cached in data/ (git-ignored) so a restart
-// doesn't refetch it. Wallets found during a sync are usable straight away.
-import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
-import path from 'node:path';
+// The list is hardcoded in bundler-wallets.json: the server only reads that file and never contacts the site.
+// To refresh it, run `npm run update-bundlers` (scripts/update-bundler-wallets.mjs), which downloads the list
+// again through the site's public API (/api/db/top, 50 wallets a page) and rewrites the file.
+import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync } from 'node:fs';
 
+// ---- used by the server: read the hardcoded list ----
+export function loadBundlerWallets(file, { enabled = true } = {}) {
+  const wallets = new Map(); // address -> { launches, pnl } (pnl: realized SOL, as reported by the site)
+  const state = { source: 'isitbundled.com (hardcoded list)', file: 'bundler-wallets.json', count: 0, fetchedAt: null, error: null };
+  if (enabled) {
+    try {
+      const j = JSON.parse(readFileSync(file, 'utf8'));
+      for (const [a, launches, pnl] of j.wallets) wallets.set(a, { launches, pnl });
+      Object.assign(state, { count: wallets.size, fetchedAt: j.fetchedAt || null });
+    } catch (e) { state.error = 'could not read ' + file + ': ' + e.message; }
+  }
+  return { get: addr => (addr ? wallets.get(addr) : undefined), state };
+}
+
+// ---- used by `npm run update-bundlers`: download the list again and rewrite the hardcoded file ----
 const API = 'https://isitbundled.com/api/db/top?page=';
 const UA = 'solana-liquidity-bubbles (+https://github.com/vincentlaw94/solana-liquidity-bubbles)';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-export function createBundlerDb({ file, refreshHours = 24, gapMs = 1200, enabled = true, log = () => {} }) {
-  let wallets = new Map(); // address -> { launches, pnl } (pnl: realized SOL, as reported by the site)
-  const state = { source: 'isitbundled.com', count: 0, updatedAt: null, syncing: false, page: 0, pages: null, error: null };
-  let resume = null; // { nextPage, startedAt, wallets } from an interrupted sync
-
-  async function load() {
+async function fetchPage(page) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     try {
-      const j = JSON.parse(await readFile(file, 'utf8'));
-      wallets = new Map(j.wallets.map(([a, launches, pnl]) => [a, { launches, pnl }]));
-      Object.assign(state, { count: wallets.size, updatedAt: j.updatedAt || null });
-      // an interrupted sync less than a day old carries on from its next page instead of starting over
-      if (j.partial && Date.now() - j.partial.startedAt < refreshHours * 3600e3) resume = { ...j.partial, wallets: new Map(wallets) };
-      log(`bundler wallets: ${wallets.size} loaded from cache` + (resume ? ` (resuming sync at page ${resume.nextPage})` : ` (${new Date(j.updatedAt).toISOString()})`));
-    } catch { /* no cache yet */ }
-  }
-
-  async function fetchPage(page) {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      try {
-        const res = await fetch(API + page, { headers: { 'user-agent': UA, accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
-        if (res.status === 429) { await sleep(30000); continue; } // asked to slow down: wait properly
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return await res.json();
-      } catch (e) {
-        if (attempt === 5) throw e;
-        await sleep(2000 * 2 ** attempt);
-      }
-    }
-  }
-
-  async function save(partial) {
-    await mkdir(path.dirname(file), { recursive: true });
-    const tmp = file + '.tmp';
-    await writeFile(tmp, JSON.stringify({ source: 'https://isitbundled.com/wallets', updatedAt: state.updatedAt,
-      partial: partial && { nextPage: partial.nextPage, startedAt: partial.startedAt },
-      wallets: [...(partial ? partial.wallets : wallets)].map(([a, i]) => [a, i.launches, i.pnl]) }));
-    await rename(tmp, file);
-  }
-
-  async function sync() {
-    if (state.syncing) return;
-    Object.assign(state, { syncing: true, page: 0, error: null });
-    const from = resume?.nextPage || 1, startedAt = resume?.startedAt || Date.now();
-    const next = resume?.wallets || new Map();
-    resume = null;
-    try {
-      for (let page = from; ; page++) {
-        const j = await fetchPage(page);
-        state.page = page; state.pages = j.pages;
-        for (const w of j.wallets || []) {
-          if (typeof w.wallet !== 'string') continue;
-          const info = { launches: w.launches ?? null, pnl: w.pnl?.realized ?? null };
-          next.set(w.wallet, info);
-          wallets.set(w.wallet, info); // usable immediately, before the sync finishes
-        }
-        state.count = wallets.size;
-        if (page >= j.pages || !j.wallets?.length) break;
-        if (page % 50 === 0) await save({ nextPage: page + 1, startedAt, wallets: next }); // checkpoint
-        await sleep(gapMs);
-      }
-      wallets = next; // drop wallets the site no longer lists
-      Object.assign(state, { count: wallets.size, updatedAt: Date.now() });
-      await save(null);
-      log(`bundler wallets: synced ${wallets.size} from isitbundled.com`);
+      const res = await fetch(API + page, { headers: { 'user-agent': UA, accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+      if (res.status === 429) { await sleep(30000); continue; } // asked to slow down: wait properly
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
     } catch (e) {
-      state.error = e.message;
-      resume = { nextPage: Math.max(from, state.page), startedAt, wallets: next }; // the next attempt picks up here
-      log(`bundler wallets: sync stopped at page ${state.page}/${state.pages ?? '?'} (${e.message}); will retry later`);
-    } finally {
-      state.syncing = false;
+      if (attempt === 5) throw e;
+      await sleep(2000 * 2 ** attempt);
     }
   }
+}
 
-  if (enabled) {
-    load().then(() => {
-      const stale = () => !state.updatedAt || Date.now() - state.updatedAt > refreshHours * 3600e3;
-      if (resume || stale()) sync();
-      setInterval(() => { if (resume || stale()) sync(); }, 3600e3); // hourly: resume a failed sync, or refresh a stale list
-    });
+// One wallet per line, sorted, so an update shows up as a readable diff.
+export function writeBundlerFile(file, wallets, fetchedAt) {
+  const rows = [...wallets].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([a, i]) => JSON.stringify([a, i.launches ?? null, i.pnl == null ? null : Math.round(i.pnl * 10) / 10]));
+  const head = {
+    source: 'https://isitbundled.com/wallets',
+    description: 'isitbundled.com Wallet DB: wallets caught bundling Solana launches. Each entry: [address, launches, realized PnL in SOL].',
+    fetchedAt, count: rows.length,
+  };
+  const json = JSON.stringify(head, null, 2).slice(0, -2) + ',\n  "wallets": [\n' + rows.join(',\n') + '\n]}\n';
+  writeFileSync(file + '.tmp', json);
+  renameSync(file + '.tmp', file);
+}
+
+// Polite full download: one page every ~1.2s, backing off on errors. Progress is saved to <file>.partial
+// every 50 pages, so an interrupted run resumes where it stopped.
+export async function syncBundlerWallets({ file, gapMs = 1200, log = console.log }) {
+  const partialFile = file + '.partial';
+  let from = 1, startedAt = new Date().toISOString(), next = new Map();
+  if (existsSync(partialFile)) {
+    const p = JSON.parse(readFileSync(partialFile, 'utf8'));
+    from = p.nextPage; startedAt = p.startedAt; next = new Map(p.wallets.map(([a, launches, pnl]) => [a, { launches, pnl }]));
+    log(`resuming at page ${from} (${next.size} wallets so far)`);
   }
-  return { get: addr => (addr ? wallets.get(addr) : undefined), state, sync };
+  let pages = null;
+  for (let page = from; ; page++) {
+    const j = await fetchPage(page);
+    pages = j.pages;
+    for (const w of j.wallets || []) {
+      if (typeof w.wallet === 'string') next.set(w.wallet, { launches: w.launches ?? null, pnl: w.pnl?.realized ?? null });
+    }
+    if (page % 25 === 0) log(`page ${page}/${pages} · ${next.size} wallets`);
+    if (page >= pages || !j.wallets?.length) break;
+    if (page % 50 === 0) writeFileSync(partialFile, JSON.stringify({ nextPage: page + 1, startedAt, wallets: [...next].map(([a, i]) => [a, i.launches, i.pnl]) }));
+    await sleep(gapMs);
+  }
+  writeBundlerFile(file, next, startedAt);
+  if (existsSync(partialFile)) unlinkSync(partialFile);
+  log(`done: ${next.size} wallets written to ${file}`);
+  return next.size;
 }

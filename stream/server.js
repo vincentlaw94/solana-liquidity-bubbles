@@ -7,7 +7,7 @@
 //      RPC_HTTP, RPC_WS (default: Solana public mainnet), PORT (8787),
 //      RPC_RPS, RPC_METHOD_RPS, DBC_TX_PER_SEC (2, websocket mode only),
 //      PUMPSWAP_ALL=1 to show every PumpSwap pool (default: only tokens that graduated from a launchpad)
-//      BUNDLER_DB=0 to skip the isitbundled.com bundler-wallet list, BUNDLER_REFRESH_HOURS (24)
+//      BUNDLER_DB=0 to skip the hardcoded isitbundled.com bundler-wallet list (bundler-wallets.json)
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,7 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022MetadataUri } from './lib/decode.js';
 import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
-import { createBundlerDb } from './lib/bundlers.js';
+import { loadBundlerWallets } from './lib/bundlers.js';
 import { createImageProxy } from './lib/images.js';
 import { createRpc, createFailoverRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
@@ -70,12 +70,9 @@ function sendTo(c, type, payload) {
   c.ws.send(payload);
 }
 const broadcast = msg => { const s = JSON.stringify(msg); for (const c of clients) sendTo(c, msg.type, s); };
-const bundlers = createBundlerDb({
-  file: path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'data', 'bundler-wallets.json'),
-  enabled: process.env.BUNDLER_DB !== '0',
-  refreshHours: +process.env.BUNDLER_REFRESH_HOURS || 24,
-  log: s => console.log(new Date().toISOString(), s),
-});
+// hardcoded list (refresh it with `npm run update-bundlers`); the server never contacts isitbundled.com
+const bundlers = loadBundlerWallets(path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'bundler-wallets.json'),
+  { enabled: process.env.BUNDLER_DB !== '0' });
 const market = new Market({ accounts, meta, prices, emit: broadcast, bundlers, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
 
 // ---- ingest ----
@@ -483,5 +480,6 @@ wss.on('connection', ws => {
 
 server.listen(PORT, () => {
   console.log(`Launchpad stream on http://localhost:${PORT}  (ws://localhost:${PORT}/ws)`);
+  console.log(bundlers.state.error ? `Bundler wallets: ${bundlers.state.error}` : `Bundler wallets: ${bundlers.state.count} (hardcoded list, fetched ${bundlers.state.fetchedAt})`);
   console.log(`RPC ${HELIUS_RPC ? 'Helius (account lookups, up to ' + HELIUS_DAILY_CALLS + ' calls/day) with fallback to ' : ''}${RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***')}`);
 });

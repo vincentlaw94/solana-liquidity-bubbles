@@ -6,7 +6,8 @@
   "description": "Self-hosted real-time stream of Solana launchpad trades decoded straight from chain logs.",
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "update-bundlers": "node scripts/update-bundler-wallets.mjs"
   },
   "engines": {
     "node": ">=22.9"
