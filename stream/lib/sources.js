@@ -92,7 +92,14 @@ export function createLogStream({ url, programs, onLogs, onStatus }) {
     };
     ws.onmessage = e => {
       lastMsg = Date.now();
-      const m = JSON.parse(e.data);
+      const data = e.data;
+      // failed transactions are a large share of launchpad traffic and are thrown away anyway:
+      // recognise them from the raw text and skip parsing the whole notification
+      if (data.includes('"logsNotification"') && !data.includes('"err":null')) {
+        const sub = /"subscription":(\d+)/.exec(data);
+        if (sub) { onLogs(subNames.get(+sub[1]), null, [], true); return; }
+      }
+      const m = JSON.parse(data);
       if (m.id) {
         if (m.error) onStatus?.('subscribe failed: ' + reqNames.get(m.id) + ' ' + m.error.message);
         else subNames.set(m.result, reqNames.get(m.id));

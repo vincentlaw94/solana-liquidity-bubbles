@@ -64,7 +64,9 @@ select, input[type="search"] {
 input[type="search"] { width: 150px; }
 
 main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; min-height: 0; }
-#stage { position: relative; min-height: 0; overflow: hidden; }
+#stage { position: relative; min-height: 0; overflow: hidden;
+  background-image: linear-gradient(rgba(138,147,173,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(138,147,173,0.06) 1px, transparent 1px);
+  background-size: 40px 40px; background-position: -0.5px -0.5px; }
 #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
 #stage.pointer canvas { cursor: pointer; }
 .overlay-msg[hidden] { display: none; }
@@ -360,6 +362,8 @@ const DEX_PALETTE = ['#f3b33d', '#5aa9ff', '#c38bff', '#2ed3a3', '#ff8a5c', '#ff
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+// read once: getComputedStyle per bubble per frame was one of the map's biggest costs
+const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
 const state = { list: 'trending', colorBy: 'm5', group: true, minLiq: 0, genuine: true, hidden: [], size: 'log', view: 'list', logos: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
@@ -368,6 +372,12 @@ let nodes = [];
 const byId = new Map();
 const dexColor = new Map();
 let clusters = new Map();
+
+// ---------- DOM writes only when something changed ----------
+const setT = (el, t) => { if (el._t !== t) { el._t = t; el.textContent = t; } };
+const setC = (el, c) => { if (el._c !== c) { el._c = c; el.className = c; } };
+const setS = (el, prop, v) => { const k = '_s_' + prop; if (el[k] !== v) { el[k] = v; el.style[prop] = v; } };
+const setH = (el, h) => { if (el._h !== h) { el._h = h; el.innerHTML = h; } };
 
 // ---------- formatting ----------
 const $ = id => document.getElementById(id);
@@ -426,6 +436,7 @@ function fromStream(r, i) {
 }
 function ingestRecords(records, final = true) {
   const ids = new Set();
+  let added = false;
   for (const d of records) {
     const id = d.id;
     if (ids.has(id) || !(d.liq > 0)) continue;
@@ -435,23 +446,33 @@ function ingestRecords(records, final = true) {
     if (n) {
       const delta = (d.liq - n.liq) / n.liq;
       if (Math.abs(delta) > 0.001) { n.flash = 1; n.flashUp = delta > 0; }
-      Object.assign(n, d); n.dying = false;
+      Object.assign(n, d); n.dying = false; n._v++;
     } else {
       const ang = Math.random() * Math.PI * 2, rad = Math.min(W, H) * (0.3 + Math.random() * 0.25);
-      n = { id, ...d, r: 0, flash: 0, ripples: [], dying: false, spawn: true, x: W / 2 + Math.cos(ang) * rad, y: H / 2 + Math.sin(ang) * rad, vx: 0, vy: 0 };
-      nodes.push(n); byId.set(id, n);
+      n = { id, ...d, r: 0, flash: 0, ripples: [], dying: false, spawn: true, x: W / 2 + Math.cos(ang) * rad, y: H / 2 + Math.sin(ang) * rad, vx: 0, vy: 0, _v: 1 };
+      nodes.push(n); byId.set(id, n); added = true;
     }
   }
-  if (final) for (const n of nodes) if (!ids.has(n.id)) n.dying = true;
-  layoutClusters();
-  // new bubbles start inside their own venue's cluster instead of drifting across the canvas
-  for (const n of nodes) if (n.spawn) {
-    n.spawn = false;
-    const c = target(n), spread = (c.r || Math.min(W, H) / 4) * 0.8;
-    n.x = c.x + (Math.random() - 0.5) * spread; n.y = c.y + (Math.random() - 0.5) * spread;
+  if (final) for (const n of nodes) if (!ids.has(n.id) && !n.dying) n.dying = true;
+  if (state.view !== 'map') removeDead(true); // no shrink animation to wait for in the list
+  else if (added) {
+    layoutClusters();
+    // new bubbles start inside their own venue's cluster instead of drifting across the canvas
+    for (const n of nodes) if (n.spawn) {
+      n.spawn = false;
+      const c = target(n), spread = (c.r || Math.min(W, H) / 4) * 0.8;
+      n.x = c.x + (Math.random() - 0.5) * spread; n.y = c.y + (Math.random() - 0.5) * spread;
+    }
+    sim.nodes(nodes); sim.alpha(0.6);
   }
-  sim.nodes(nodes); sim.alpha(0.6);
   $('overlay').hidden = true;
+}
+// drop pools that left the list: immediately in list view, once their bubble has shrunk on the map
+function removeDead(force) {
+  if (!nodes.some(n => n.dying && (force || n.r < 0.5))) return;
+  nodes = nodes.filter(n => { const gone = n.dying && (force || n.r < 0.5); if (gone) byId.delete(n.id); return !gone; });
+  if (state.selected && !byId.has(state.selected.id)) select(null);
+  sim.nodes(nodes);
 }
 
 // ---------- self-hosted chain stream ----------
@@ -473,10 +494,11 @@ function streamConnect() {
   };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
+    if (m.type === 'stats') { stream.stats = m.stats; renderStatus(); return; }
     if (m.type === 'pools') {
-      stream.stats = m.stats;
       if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
-      if (m.pools.length) { ingestRecords(m.pools.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); }
+      const rows = applySnapshot(m);
+      if (rows.length) { ingestRecords(rows.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); }
       // the open coin moved pools (bonding curve -> AMM after graduation): follow it
       const sel = state.selected;
       if (sel && (sel.dying || !byId.has(sel.id))) {
@@ -498,6 +520,18 @@ function streamConnect() {
     stream.timer = setTimeout(streamConnect, Math.min(15000, 1000 * 2 ** stream.retry++));
   };
 }
+// The server sends each coin's static fields (s) once and its live fields (d) only when they change.
+const records = new Map(); // id -> { s, d }
+function applySnapshot(m) {
+  if (m.reset) records.clear();
+  for (const o of m.s) { const r = records.get(o.id) || records.set(o.id, {}).get(o.id); r.s = o; }
+  for (const o of m.d) { const r = records.get(o.id) || records.set(o.id, {}).get(o.id); r.d = o; }
+  const inList = new Set(m.order);
+  for (const id of records.keys()) if (!inList.has(id)) records.delete(id);
+  const rows = [];
+  for (const id of m.order) { const r = records.get(id); if (r?.s && r.d) rows.push({ ...r.s, ...r.d }); }
+  return rows;
+}
 function tapeRow(t, isNew) {
   return { kind: t.b ? 'buy' : 'sell', block_timestamp: t.t, volume_in_usd: t.u ?? 0, tx_hash: t.s, tx_from_address: t.w, isNew };
 }
@@ -510,6 +544,7 @@ function onStreamTrades(trades) {
     const n = byId.get(t.p);
     if (!n) continue;
     n.lastTrade = { at: performance.now(), b: !!t.b };
+    n._v++;
     // every swap moves price, market cap and liquidity; don't wait for the next pool snapshot
     if (t.pr != null) n.price = t.pr;
     if (t.mc != null) n.mcap = t.mc;
@@ -527,28 +562,28 @@ function onStreamTrades(trades) {
   }
 }
 function pushFeed(ev) {
-  feed.unshift({ ...ev, fresh: true });
-  feed.length = Math.min(feed.length, 40);
-  renderFeed();
-}
-function renderFeed() {
   const el = $('feed');
-  if (!feed.length) return;
-  el.innerHTML = '';
-  for (const ev of feed) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    if (ev.fresh) { b.className = 'fresh'; ev.fresh = false; }
-    const grad = ev.kind === 'graduate';
-    b.innerHTML = '<span class="t">' + new Date(ev.at).toLocaleTimeString([], { hour12: false }) + '</span>' +
-      '<span class="k ' + (grad ? 'grad' : 'new') + '">' + (grad ? 'GRAD' : 'NEW') + '</span>' +
-      '<span class="nm">' + esc(ev.symbol || '?') + (ev.name ? ' <span class="v">' + esc(ev.name) + '</span>' : '') + '</span>' +
-      '<span class="v">' + esc(prettyDex(ev.venue || '')) + '</span>';
-    b.title = byId.has(ev.pool) ? 'Open this pool' : 'Not on the map yet: it appears once it trades enough to rank';
-    b.addEventListener('click', () => { const n = byId.get(ev.pool); if (n) select(n); });
-    el.appendChild(b);
-  }
+  if (!feed.length) el.innerHTML = '';
+  feed.unshift(ev);
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'fresh'; b.dataset.pool = ev.pool;
+  const grad = ev.kind === 'graduate';
+  b.innerHTML = '<span class="t">' + new Date(ev.at).toLocaleTimeString([], { hour12: false }) + '</span>' +
+    '<span class="k ' + (grad ? 'grad' : 'new') + '">' + (grad ? 'GRAD' : 'NEW') + '</span>' +
+    '<span class="nm">' + esc(ev.symbol || '?') + (ev.name ? ' <span class="v">' + esc(ev.name) + '</span>' : '') + '</span>' +
+    '<span class="v">' + esc(prettyDex(ev.venue || '')) + '</span>';
+  el.prepend(b);
+  if (feed.length > 40) { feed.length = 40; el.lastElementChild?.remove(); }
 }
+$('feed').addEventListener('click', e => {
+  const b = e.target.closest('button[data-pool]'); if (!b) return;
+  const n = byId.get(b.dataset.pool);
+  if (n) select(n);
+});
+$('feed').addEventListener('mouseover', e => {
+  const b = e.target.closest('button[data-pool]');
+  if (b) b.title = byId.has(b.dataset.pool) ? 'Open this pool' : 'Not on the map yet: it appears once it trades enough to rank';
+});
 
 // ---------- trades for the open pool ----------
 let tradeRows = [], tradeFor = null;
@@ -604,6 +639,7 @@ function layoutClusters() {
   for (const c of circles) {
     clusters.set(c.dex, { x: W / 2 + (c.x - e.x) * k * sx, y: H / 2 + pad / 2 + (c.y - e.y) * k * sy, r: c.r * k, liq: c.liq });
   }
+  fx.x(d => target(d).x); fy.y(d => target(d).y);
 }
 function scaleK() {
   if (state.group) return clusterK;
@@ -642,17 +678,28 @@ function logoHtml(n, cls = 'logo') {
   return '<img class="' + cls + '" src="' + esc(n.icon) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.hidden=true;this.nextElementSibling.hidden=false">' + badge;
 }
 
+const toBuy = d3.interpolateRgb(C.neutral, C.buy), toSell = d3.interpolateRgb(C.neutral, C.sell), toAccent = d3.interpolateRgb(C.neutral, C.accent);
+const q50 = v => Math.round(v * 50) / 50; // 50 shades per ramp: indistinguishable on screen, and cacheable
 function fillFor(n) {
   if (state.colorBy === 'dex') return getDexColor(n.dex);
-  if (state.colorBy === 'progress') return n.progress == null ? C.neutral : d3.interpolateRgb(C.neutral, C.accent)(n.progress);
+  if (state.colorBy === 'progress') return n.progress == null ? C.neutral : toAccent(q50(n.progress));
   if (!isFinite(n.chg[state.colorBy])) return C.neutral;
   const t = Math.max(-1, Math.min(1, n.chg[state.colorBy] / COLOR_RANGE[state.colorBy]));
-  const k = Math.sqrt(Math.abs(t));
-  return t >= 0 ? d3.interpolateRgb(C.neutral, C.buy)(k) : d3.interpolateRgb(C.neutral, C.sell)(k);
+  const k = q50(Math.sqrt(Math.abs(t)));
+  return t >= 0 ? toBuy(k) : toSell(k);
+}
+// fill colour plus the lighter/darker stops of its gradient, recomputed only when the colour changes
+function shadesFor(n) {
+  const col = fillFor(n);
+  if (n._col !== col) { n._col = col; const c = d3.color(col); n._hi = c.brighter(0.6).formatRgb(); n._lo = c.darker(0.5).formatRgb(); }
+  return n;
 }
 
-let last = performance.now();
+let last = performance.now(), rafId = 0;
+function startFrames() { if (!rafId && state.view === 'map') { last = performance.now(); rafId = requestAnimationFrame(frame); } }
 function frame(now) {
+  rafId = 0;
+  if (state.view !== 'map') return; // the list doesn't need physics or drawing: the loop sleeps until the map is back
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   const k = scaleK();
   // grow/shrink bubbles toward their liquidity-derived radius
@@ -663,34 +710,24 @@ function frame(now) {
     for (const rp of n.ripples) rp.t += dt / (rp.real ? 1.6 : 1.2);
     if (n.ripples.length) n.ripples = n.ripples.filter(rp => rp.t < 1);
   }
-  const before = nodes.length;
-  nodes = nodes.filter(n => !(n.dying && n.r < 0.5));
-  if (nodes.length !== before) {
-    for (const id of [...byId.keys()]) if (!nodes.some(n => n.id === id)) byId.delete(id);
-    if (state.selected && !byId.has(state.selected.id)) select(null);
-    sim.nodes(nodes);
-  }
-  collide.radius(d => d.r + 2); fx.x(d => target(d).x); fy.y(d => target(d).y);
+  removeDead(false);
+  collide.radius(d => d.r + 2); // radii animate every frame; cluster targets only change in layoutClusters()
   sim.alpha(Math.max(sim.alpha(), 0.25)); sim.tick();
   for (const n of nodes) {
     n.x = Math.max(n.r, Math.min(W - n.r, n.x));
     n.y = Math.max(n.r, Math.min(H - n.r, n.y));
   }
   // one bad value must never stop the animation loop
-  if (state.view === 'map') try { draw(); } catch (e) { console.error(e); }
-  requestAnimationFrame(frame);
+  try { draw(); } catch (e) { console.error(e); }
+  rafId = requestAnimationFrame(frame);
 }
 
 function draw() {
-  ctx.clearRect(0, 0, W, H);
-  // faint grid
-  ctx.strokeStyle = 'rgba(138,147,173,0.06)'; ctx.lineWidth = 1;
-  for (let x = 40; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, H); ctx.stroke(); }
-  for (let y = 40; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); ctx.stroke(); }
+  ctx.clearRect(0, 0, W, H); // the grid is a CSS background behind the canvas
 
   if (state.group) {
     ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.font = '500 11px ' + css('--mono');
+    ctx.font = '500 11px ' + FONT_MONO;
     for (const [dex, c] of clusters) {
       // faint venue boundary + label above it
       ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
@@ -717,7 +754,7 @@ function draw() {
     }
     ctx.globalAlpha = dim ? 0.15 : 1;
     // body
-    const col = fillFor(n);
+    const col = shadesFor(n)._col;
     const img = n.r > 7 ? logo(n.icon) : null;
     if (img) {
       // token logo fills the bubble; a thick ring carries the colour encoding instead
@@ -741,8 +778,8 @@ function draw() {
       }
     } else {
       const g = ctx.createRadialGradient(n.x - n.r * 0.35, n.y - n.r * 0.4, n.r * 0.1, n.x, n.y, n.r);
-      g.addColorStop(0, d3.color(col).brighter(0.6).formatRgb());
-      g.addColorStop(1, d3.color(col).darker(0.5).formatRgb());
+      g.addColorStop(0, n._hi);
+      g.addColorStop(1, n._lo);
       ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
       ctx.fillStyle = g; ctx.fill();
       // ring: venue identity when coloring by price
@@ -765,20 +802,25 @@ function draw() {
     // labels
     if (n.r > 15) {
       const fs = Math.max(10, Math.min(24, n.r * 0.36));
-      ctx.font = '700 ' + fs + 'px ' + css('--display');
+      ctx.font = '700 ' + fs + 'px ' + FONT_DISPLAY;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      let label = n.sym; const maxW = n.r * 1.7;
-      while (label.length > 2 && ctx.measureText(label).width > maxW) label = label.slice(0, -1);
-      if (label !== n.sym) label = label.slice(0, -1) + '…';
+      // truncating with measureText is costly: redo it only when the symbol or the bubble's size bucket changes
+      const lkey = n.sym + '|' + Math.round(n.r);
+      if (n._lkey !== lkey) {
+        let label = n.sym; const maxW = n.r * 1.7;
+        while (label.length > 2 && ctx.measureText(label).width > maxW) label = label.slice(0, -1);
+        n._label = label !== n.sym ? label.slice(0, -1) + '…' : label; n._lkey = lkey;
+      }
+      const label = n._label;
       const showSub = n.r > 32;
       if (img) {
         // label sits on the shaded lower half of the logo
         const lfs = Math.min(fs, n.r * 0.3);
-        ctx.font = '700 ' + lfs + 'px ' + css('--display');
+        ctx.font = '700 ' + lfs + 'px ' + FONT_DISPLAY;
         ctx.fillStyle = '#f4f6fb';
         ctx.fillText(label, n.x, n.y + n.r * (showSub ? 0.4 : 0.52));
         if (showSub) {
-          ctx.font = '500 ' + Math.max(9, Math.min(12, n.r * 0.16)) + 'px ' + css('--mono');
+          ctx.font = '500 ' + Math.max(9, Math.min(12, n.r * 0.16)) + 'px ' + FONT_MONO;
           ctx.fillStyle = 'rgba(244,246,251,0.8)';
           ctx.fillText(usd(n.liq), n.x, n.y + n.r * 0.66);
         }
@@ -787,7 +829,7 @@ function draw() {
         ctx.fillText(label, n.x, n.y - (showSub ? fs * 0.42 : 0));
         if (showSub) {
           const fs2 = Math.max(9, Math.min(13, n.r * 0.19));
-          ctx.font = '500 ' + fs2 + 'px ' + css('--mono');
+          ctx.font = '500 ' + fs2 + 'px ' + FONT_MONO;
           ctx.fillStyle = 'rgba(9,13,22,0.72)';
           ctx.fillText(usd(n.liq), n.x, n.y + fs * 0.62);
         }
@@ -907,61 +949,73 @@ function tickCell(td, v, text) {
   const now = performance.now();
   if (td._v !== undefined && isFinite(v) && isFinite(td._v) && v !== td._v) { td._dir = v > td._v ? 'tick-up' : 'tick-down'; td._until = now + 900; }
   td._v = v;
-  td.textContent = text;
-  td.className = now < (td._until || 0) ? td._dir : '';
+  setT(td, text);
+  setC(td, now < (td._until || 0) ? td._dir : '');
 }
-const changeCol = (label, k) => ({ label, sort: n => n.chg[k], set: (td, n) => { td.textContent = pct(n.chg[k]); td.className = cls(n.chg[k]); } });
+const changeCol = (label, k) => ({ label, sort: n => n.chg[k], set: (td, n) => { setT(td, pct(n.chg[k])); setC(td, cls(n.chg[k])); } });
+// cells with a value and a small bar under it
+const initBar = color => td => { td.innerHTML = barCell(color); td._span = td.querySelector('span'); td._mini = td.querySelector('.mini'); td._bar = td._mini.firstElementChild; };
 const COLUMNS = {
   // position in the selected list as ranked by the server (trend score, 24h volume, newest, ...)
-  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n) => { td.textContent = n.rank ?? '–'; } },
+  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n) => { setT(td, String(n.rank ?? '–')); } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
-    init: td => { td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="warn-mark" hidden>⚠</span><span class="ca-slot"></span><span class="hide-slot"></span></div>'; },
+    init: td => {
+      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="warn-mark" hidden>⚠</span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
+      td._lg = td.querySelector('.lg'); td._b = td.querySelector('b'); td._small = td.querySelector('small');
+      td._wm = td.querySelector('.warn-mark'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot');
+    },
     set: (td, n) => {
-      const key = (state.logos && n.icon) || '';
-      if (td.dataset.icon !== key) { td.dataset.icon = key; td.querySelector('.lg').innerHTML = logoHtml(n); }
-      td.querySelector('b').textContent = n.sym;
-      td.querySelector('small').textContent = '/ ' + n.quote;
-      const wm = td.querySelector('.warn-mark');
-      wm.hidden = !n.flags.length;
-      if (n.flags.length) { wm.title = n.flags.join('\n'); wm.setAttribute('aria-label', 'Red flags: ' + n.flags.join('; ')); }
-      const slot = td.querySelector('.ca-slot');
-      if (slot.dataset.ca !== (n.mint || '')) { slot.dataset.ca = n.mint || ''; slot.innerHTML = copyButtonHtml(n.mint, n.sym); }
-      const hs = td.querySelector('.hide-slot');
-      if (hs.dataset.ca !== (n.mint || '')) { hs.dataset.ca = n.mint || ''; hs.innerHTML = hideButtonHtml(n); }
+      const key = ((state.logos && n.icon) || '') + '|' + n.sym + '|' + n.dex;
+      if (td._key !== key) { td._key = key; td._lg.innerHTML = logoHtml(n); }
+      setT(td._b, n.sym);
+      setT(td._small, '/ ' + n.quote);
+      const flags = n.flags.join('\n');
+      if (td._flags !== flags) {
+        td._flags = flags; td._wm.hidden = !n.flags.length;
+        if (n.flags.length) { td._wm.title = flags; td._wm.setAttribute('aria-label', 'Red flags: ' + n.flags.join('; ')); }
+      }
+      const mint = n.mint || '';
+      if (td._mint !== mint) { td._mint = mint; td._ca.innerHTML = copyButtonHtml(n.mint, n.sym); td._hide.innerHTML = hideButtonHtml(n); }
     } },
   mcap: { label: 'Market cap', sort: mcapOf, set: (td, n) => { const v = mcapOf(n); tickCell(td, v, usdFine(v)); } },
   venue: { label: 'Venue', align: 'l', sort: n => prettyDex(n.dex).toLowerCase(),
-    init: td => { td.innerHTML = '<span class="venue"><i></i><span></span></span>'; },
-    set: (td, n) => { td.querySelector('i').style.background = getDexColor(n.dex); td.querySelector('span span').textContent = prettyDex(n.dex); } },
-  liq: { label: 'Liquidity', sort: n => n.liq, init: td => { td.innerHTML = barCell(); },
+    init: td => { td.innerHTML = '<span class="venue"><i></i><span></span></span>'; td._i = td.querySelector('i'); td._name = td.querySelector('span span'); },
+    set: (td, n) => { setS(td._i, 'background', getDexColor(n.dex)); setT(td._name, prettyDex(n.dex)); } },
+  liq: { label: 'Liquidity', sort: n => n.liq, init: initBar(),
     set: (td, n, ctx) => {
-      td.querySelector('span').textContent = usd(n.liq);
-      const b = td.querySelector('.mini > div');
-      b.style.width = (100 * n.liq / ctx.maxLiq).toFixed(1) + '%'; b.style.background = getDexColor(n.dex);
+      setT(td._span, usd(n.liq));
+      setS(td._bar, 'width', (100 * n.liq / ctx.maxLiq).toFixed(1) + '%'); setS(td._bar, 'background', getDexColor(n.dex));
     } },
   price: { label: 'Price', sort: n => n.price, set: (td, n) => { tickCell(td, n.price, price(n.price)); } },
   m5: changeCol('Δ 5m', 'm5'),
   h1: changeCol('Δ 1h', 'h1'),
   h24: changeCol('Δ 24h', 'h24'),
-  vol5: { label: 'Vol 5m', sort: n => n.vol5, set: (td, n) => { td.textContent = usd(n.vol5); } },
-  vol1: { label: 'Vol 1h', sort: n => n.vol1, set: (td, n) => { td.textContent = usd(n.vol1); } },
-  vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { td.textContent = usd(n.vol24); } },
-  traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { td.textContent = n.traders5 ? n.traders5 : '–'; } },
-  score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { td.textContent = n.score != null ? n.score.toFixed(1) : '–'; } },
+  vol5: { label: 'Vol 5m', sort: n => n.vol5, set: (td, n) => { setT(td, usd(n.vol5)); } },
+  vol1: { label: 'Vol 1h', sort: n => n.vol1, set: (td, n) => { setT(td, usd(n.vol1)); } },
+  vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { setT(td, usd(n.vol24)); } },
+  traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { setT(td, n.traders5 ? String(n.traders5) : '–'); } },
+  score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { setT(td, n.score != null ? n.score.toFixed(1) : '–'); } },
   tx: { label: 'Buys / sells 5m', sort: n => n.buys5 + n.sells5,
-    init: td => { td.innerHTML = '<div class="cellbar"><span></span><div class="mini split"><div></div></div></div>'; },
+    init: td => {
+      td.innerHTML = '<div class="cellbar"><span><span class="up"></span> / <span class="down"></span></span><div class="mini split"><div></div></div></div>';
+      td._buys = td.querySelector('.up'); td._sells = td.querySelector('.down'); td._bar = td.querySelector('.mini > div');
+    },
     set: (td, n) => {
       const tx = n.buys5 + n.sells5;
-      td.querySelector('span').innerHTML = '<span class="up">' + n.buys5 + '</span> / <span class="down">' + n.sells5 + '</span>';
-      td.querySelector('.mini > div').style.width = (tx ? 100 * n.buys5 / tx : 50) + '%';
+      setT(td._buys, String(n.buys5)); setT(td._sells, String(n.sells5));
+      setS(td._bar, 'width', (tx ? 100 * n.buys5 / tx : 50).toFixed(1) + '%');
     } },
-  progress: { label: 'Curve', sort: n => n.progress ?? -1, init: td => { td.innerHTML = barCell('var(--accent)'); },
+  progress: { label: 'Curve', sort: n => n.progress ?? -1, init: initBar('var(--accent)'),
     set: (td, n) => {
-      td.querySelector('span').textContent = n.progress == null ? '–' : n.graduated ? 'graduated' : (n.progress * 100).toFixed(1) + '%';
-      td.querySelector('.mini').style.visibility = n.progress == null ? 'hidden' : 'visible';
-      td.querySelector('.mini > div').style.width = ((n.progress || 0) * 100).toFixed(1) + '%';
+      setT(td._span, n.progress == null ? '–' : n.graduated ? 'graduated' : (n.progress * 100).toFixed(1) + '%');
+      setS(td._mini, 'visibility', n.progress == null ? 'hidden' : 'visible');
+      setS(td._bar, 'width', ((n.progress || 0) * 100).toFixed(1) + '%');
     } },
-  coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity, set: (td, n) => { td.textContent = n.born ? ago(n.born) : '–'; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; } },
+  coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
+    set: (td, n) => {
+      setT(td, n.born ? ago(n.born) : '–');
+      if (td._born !== n.born) { td._born = n.born; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; }
+    } },
 };
 const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
 function normalizeColumns(saved) {
@@ -1001,9 +1055,9 @@ function sortValue(n, k) {
   const v = (COLUMNS[k] || COLUMNS.liq).sort(n);
   return typeof v === 'number' && !isFinite(v) ? -Infinity : v;
 }
-function makeRow(cols) {
+function makeRow(cols, id) {
   const tr = document.createElement('tr');
-  tr.tabIndex = 0;
+  tr.tabIndex = 0; tr.dataset.id = id;
   for (const k of cols) {
     const td = document.createElement('td');
     if (COLUMNS[k].align) td.className = COLUMNS[k].align;
@@ -1015,31 +1069,40 @@ function makeRow(cols) {
   return tr;
 }
 function updateRow(tr, n, cols, ctx) {
-  tr.dataset.id = n.id;
-  cols.forEach((k, i) => COLUMNS[k].set(tr.children[i], n, ctx));
-  tr.setAttribute('aria-selected', state.selected === n ? 'true' : 'false');
-  // tint the row briefly when a swap lands, or when liquidity moves between updates
+  const sel = state.selected === n;
+  // tint the row briefly when a swap lands
   const age = n.lastTrade ? ctx.now - n.lastTrade.at : Infinity;
-  if (age < 700) tr.style.backgroundColor = (n.lastTrade.b ? 'rgba(46,211,163,' : 'rgba(255,100,112,') + (0.12 * (1 - age / 700)).toFixed(3) + ')';
-  else if (n.flash > 0) tr.style.backgroundColor = (n.flashUp ? 'rgba(46,211,163,' : 'rgba(255,100,112,') + (0.22 * n.flash).toFixed(3) + ')';
-  else tr.style.backgroundColor = '';
+  const tint = age < 700 ? (n.lastTrade.b ? 'rgba(46,211,163,' : 'rgba(255,100,112,') + (0.12 * (1 - age / 700)).toFixed(2) + ')' : '';
+  // nothing new for this row: skip it (a full refresh still runs once a second for ages and fading highlights)
+  if (tr._v === n._v && tr._sel === sel && tr._tint === tint && !tint && ctx.now - tr._at < 1000 && tr._maxLiq === ctx.maxLiq) return;
+  for (let i = 0; i < cols.length; i++) COLUMNS[cols[i]].set(tr.children[i], n, ctx);
+  if (tr._sel !== sel) { tr._sel = sel; tr.setAttribute('aria-selected', sel ? 'true' : 'false'); }
+  if (tr._tint !== tint) { tr._tint = tint; tr.style.backgroundColor = tint; }
+  tr._v = n._v; tr._at = ctx.now; tr._maxLiq = ctx.maxLiq;
 }
 function renderList() {
   if (state.view !== 'list') return;
   const body = $('listBody'), cols = shownColumns();
   const { key, dir } = state.sort;
-  const list = nodes.filter(n => visible(n) && matches(n))
-    .sort((a, b) => { const x = sortValue(a, key), y = sortValue(b, key); return (x < y ? -1 : x > y ? 1 : 0) * dir || b.liq - a.liq; });
-  const ctx = { maxLiq: d3.max(list, d => d.liq) || 1, now: performance.now() }, seen = new Set();
+  // decorate-sort: one sort value per row instead of two per comparison
+  const keyed = [];
+  for (const n of nodes) if (visible(n) && matches(n)) keyed.push([sortValue(n, key), n]);
+  keyed.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) * dir || b[1].liq - a[1].liq);
+  const list = keyed.map(k => k[1]);
+  let maxLiq = 1;
+  for (const n of list) if (n.liq > maxLiq) maxLiq = n.liq;
+  // bar widths are relative to the largest pool; bucket it so a 0.1% wiggle doesn't repaint every bar
+  const ctx = { maxLiq: +maxLiq.toPrecision(2), now: performance.now() }, seen = new Set();
   list.forEach((n, i) => {
     let tr = listRows.get(n.id);
-    if (!tr) { tr = makeRow(cols); listRows.set(n.id, tr); }
+    if (!tr) { tr = makeRow(cols, n.id); listRows.set(n.id, tr); }
     updateRow(tr, n, cols, ctx);
     if (body.children[i] !== tr) body.insertBefore(tr, body.children[i] || null);
     seen.add(n.id);
   });
   for (const [id, tr] of listRows) if (!seen.has(id)) { tr.remove(); listRows.delete(id); }
-  $('listEmpty').hidden = list.length > 0 || !nodes.length;
+  const empty = list.length > 0 || !nodes.length;
+  if ($('listEmpty').hidden !== empty) $('listEmpty').hidden = empty;
 }
 $('listHead').addEventListener('click', e => {
   const th = e.target.closest('th'); if (!th) return;
@@ -1157,79 +1220,81 @@ function renderStatus() {
 }
 function renderPanels() {
   const vis = nodes.filter(visible);
-  const label = LISTS[state.list];
-  $('setLabel').textContent = label + ' · ' + vis.length + ' on map';
-  $('sLiq').textContent = usd(d3.sum(vis, d => d.liq));
-  $('sVolLabel').textContent = '24h volume';
-  $('sVol').textContent = usd(d3.sum(vis, d => d.vol24));
-  $('sVol5').textContent = usd(d3.sum(vis, d => d.vol5));
-  const b = d3.sum(vis, d => d.buys5), s = d3.sum(vis, d => d.sells5);
-  $('sTx5').textContent = (b + s).toLocaleString();
-  $('sRatio').style.width = (b + s ? (100 * b / (b + s)) : 50) + '%';
-  $('sBuys').textContent = 'buys ' + b.toLocaleString();
-  $('sSells').textContent = 'sells ' + s.toLocaleString();
-  renderBoard(); renderDex(vis); renderLegend(); renderPool(true);
+  let liq = 0, vol = 0, vol5 = 0, b = 0, s = 0;
+  for (const n of vis) { liq += n.liq; vol += n.vol24; vol5 += n.vol5; b += n.buys5; s += n.sells5; }
+  setT($('setLabel'), LISTS[state.list] + ' · ' + vis.length + ' on map');
+  setT($('sLiq'), usd(liq));
+  setT($('sVolLabel'), '24h volume');
+  setT($('sVol'), usd(vol));
+  setT($('sVol5'), usd(vol5));
+  setT($('sTx5'), (b + s).toLocaleString());
+  setS($('sRatio'), 'width', (b + s ? (100 * b / (b + s)) : 50).toFixed(1) + '%');
+  setT($('sBuys'), 'buys ' + b.toLocaleString());
+  setT($('sSells'), 'sells ' + s.toLocaleString());
+  renderBoard(vis); renderDex(vis); renderLegend(); renderPool(true);
 }
-function renderBoard() {
-  const vis = nodes.filter(visible).sort((a, b) => b.liq - a.liq).slice(0, 10);
-  const el = $('board'); el.innerHTML = '';
-  vis.forEach((n, i) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.setAttribute('aria-current', state.selected === n ? 'true' : 'false');
-    btn.innerHTML = '<span class="rk">' + (i + 1) + '</span><span class="nm">' + esc(n.sym) + ' <small>/ ' + esc(n.quote) + ' · ' + esc(prettyDex(n.dex)) + '</small></span>' +
-      '<span>' + usd(n.liq) + '</span><span class="' + cls(n.chg.h1) + '">' + pct(n.chg.h1) + '</span>';
-    btn.addEventListener('click', () => select(n));
-    el.appendChild(btn);
-  });
-  if (!vis.length) el.innerHTML = '<div class="empty">No pools match this filter.</div>';
+function renderBoard(vis = nodes.filter(visible)) {
+  const top = vis.slice().sort((a, b) => b.liq - a.liq).slice(0, 10);
+  setH($('board'), top.length ? top.map((n, i) =>
+    '<button type="button" data-id="' + esc(n.id) + '" aria-current="' + (state.selected === n) + '"><span class="rk">' + (i + 1) + '</span><span class="nm">' + esc(n.sym) + ' <small>/ ' + esc(n.quote) + ' · ' + esc(prettyDex(n.dex)) + '</small></span>' +
+    '<span>' + usd(n.liq) + '</span><span class="' + cls(n.chg.h1) + '">' + pct(n.chg.h1) + '</span></button>').join('') : '<div class="empty">No pools match this filter.</div>');
 }
+$('board').addEventListener('click', e => { const b = e.target.closest('button[data-id]'); if (b) select(byId.get(b.dataset.id) || null); });
 function renderDex(vis) {
-  const tot = d3.rollups(vis, v => d3.sum(v, d => d.liq), d => d.dex).sort((a, b) => b[1] - a[1]);
-  const max = tot.length ? tot[0][1] : 1;
-  $('dexbars').innerHTML = tot.map(([dex, liq]) =>
-    '<div class="dexbar"><span>' + esc(prettyDex(dex)) + '</span><div class="bar"><div style="width:' + (100 * liq / max) + '%;background:' + getDexColor(dex) + '"></div></div><span class="v">' + usd(liq) + '</span></div>').join('');
+  const tot = new Map();
+  for (const n of vis) tot.set(n.dex, (tot.get(n.dex) || 0) + n.liq);
+  const rows = [...tot].sort((a, b) => b[1] - a[1]);
+  const max = rows.length ? rows[0][1] : 1;
+  setH($('dexbars'), rows.map(([dex, liq]) =>
+    '<div class="dexbar"><span>' + esc(prettyDex(dex)) + '</span><div class="bar"><div style="width:' + (100 * liq / max).toFixed(1) + '%;background:' + getDexColor(dex) + '"></div></div><span class="v">' + usd(liq) + '</span></div>').join(''));
 }
 function renderLegend() {
-  const el = $('legend');
+  let html;
   if (state.colorBy === 'progress') {
-    el.innerHTML = '<span>Fill: bonding-curve progress · grey: AMM pool</span><div class="grad" style="background:linear-gradient(90deg,var(--neutral),var(--accent))"></div><div class="grad-labels"><span>0%</span><span>graduated</span></div>';
-    return;
-  }
-  if (state.colorBy === 'dex') {
+    html = '<span>Fill: bonding-curve progress · grey: AMM pool</span><div class="grad" style="background:linear-gradient(90deg,var(--neutral),var(--accent))"></div><div class="grad-labels"><span>0%</span><span>graduated</span></div>';
+  } else if (state.colorBy === 'dex') {
     const dexes = [...new Set(nodes.filter(visible).map(n => n.dex))];
-    el.innerHTML = '<span>Fill: venue · size: liquidity</span><div class="dex-keys">' +
+    html = '<span>Fill: venue · size: liquidity</span><div class="dex-keys">' +
       dexes.map(d => '<span><i style="background:' + getDexColor(d) + '"></i>' + esc(prettyDex(d)) + '</span>').join('') + '</div>';
   } else {
     const r = COLOR_RANGE[state.colorBy], lbl = { m5: '5m', h1: '1h', h24: '24h' }[state.colorBy] + (state.colorBy !== 'm5' ? ' (tracked)' : '');
-    el.innerHTML = '<span>Fill: price change ' + lbl + ' · ring: venue · size: liquidity' + ({ sqrt: ' (compressed √)', log: ' (log scale)', area: '' })[state.size] + '</span><div class="grad"></div>' +
+    html = '<span>Fill: price change ' + lbl + ' · ring: venue · size: liquidity' + ({ sqrt: ' (compressed √)', log: ' (log scale)', area: '' })[state.size] + '</span><div class="grad"></div>' +
       '<div class="grad-labels"><span>≤ −' + r + '%</span><span>0</span><span>≥ +' + r + '%</span></div>';
   }
+  setH($('legend'), html); // only touches the DOM when the legend actually changed
+}
+// The panel is rebuilt only when its structure changes (another pool, flags appear, a row comes or goes).
+// Otherwise its numbers are updated in place, so the logo and links aren't re-created twice a second.
+function poolShape(n) {
+  return [n.id, n.sym, n.name, n.dex, state.logos && n.icon, n.mint, n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
 }
 function renderPool(refreshOnly) {
   const el = $('poolPanel'), n = state.selected;
-  if (!n) { el.innerHTML = '<div class="empty">Click a bubble to open the pool and stream its swaps.</div>'; return; }
+  if (!n) { el._shape = null; setH(el, '<div class="empty">Click a bubble to open the pool and stream its swaps.</div>'); return; }
+  const shape = poolShape(n);
+  if (refreshOnly && el._shape === shape) { refreshPool(n); return; }
+  el._shape = shape; el._h = null;
   const tx = n.buys5 + n.sells5;
   el.innerHTML =
     '<div class="pool-head"><div><div class="label">Open pool</div><h2>' + logoHtml(n) + '<span>' + esc(n.name) + '</span></h2></div>' +
     '<button type="button" class="close" id="closePool" aria-label="Close pool">✕</button></div>' +
     '<div style="display:flex;gap:6px;flex-wrap:wrap"><span class="chip" style="border-color:' + getDexColor(n.dex) + '">' + esc(prettyDex(n.dex)) + '</span>' +
-    (n.born ? '<span class="chip" title="Created ' + esc(new Date(n.born).toLocaleString()) + '">age ' + ago(n.born) + '</span>' : '') + '</div>' +
+    (n.born ? '<span class="chip" title="Created ' + esc(new Date(n.born).toLocaleString()) + '" data-f="age">age ' + ago(n.born) + '</span>' : '') + '</div>' +
     (n.flags.length ? '<div class="flags"><b>⚠ Red flags</b><ul>' + n.flags.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>' : '') +
     (n.mint ? '<div class="ca"><span class="lbl">CA</span><code>' + esc(n.mint) + '</code>' + copyButtonHtml(n.mint, n.sym) + '</div>' : '') +
     '<dl class="kv">' +
     '<dt>Price</dt><dd id="pvPrice">' + price(n.price) + '</dd>' +
     '<dt>Liquidity</dt><dd id="pvLiq">' + usdFine(n.liq) + '</dd>' +
     '<dt>Market cap</dt><dd id="pvMcap">' + usdFine(n.mcap || NaN) + '</dd>' +
-    '<dt>24h volume</dt><dd>' + usd(n.vol24) + '</dd>' +
-    '<dt>1h volume</dt><dd>' + usd(n.vol1) + '</dd>' +
-    '<dt>5m volume</dt><dd>' + usd(n.vol5) + '</dd>' +
-    (n.traders5 ? '<dt>Traders 5m</dt><dd>' + n.traders5 + '</dd>' : '') +
-    (n.score != null ? '<dt>Trend score</dt><dd>' + n.score.toFixed(1) + '</dd>' : '') + '</dl>' +
-    (n.progress != null ? '<div class="progress"><span>' + (n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation') + '</span><div class="bar"><div style="width:' + (n.progress * 100).toFixed(1) + '%"></div></div></div>' : '') +
-    '<div class="changes">' + ['m5', 'h1', 'h24'].map(k => '<div><small>Δ ' + { m5: '5m', h1: '1h', h24: '24h' }[k] + '</small><span class="' + cls(n.chg[k]) + '">' + pct(n.chg[k]) + '</span></div>').join('') + '</div>' +
-    '<div><div class="ratio"><div style="width:' + (tx ? 100 * n.buys5 / tx : 50) + '%"></div></div>' +
-    '<div class="ratio-labels"><span class="up">5m buys ' + n.buys5 + '</span><span class="down">sells ' + n.sells5 + '</span></div></div>' +
+    '<dt>24h volume</dt><dd data-f="vol24">' + usd(n.vol24) + '</dd>' +
+    '<dt>1h volume</dt><dd data-f="vol1">' + usd(n.vol1) + '</dd>' +
+    '<dt>5m volume</dt><dd data-f="vol5">' + usd(n.vol5) + '</dd>' +
+    (n.traders5 ? '<dt>Traders 5m</dt><dd data-f="traders5">' + n.traders5 + '</dd>' : '') +
+    (n.score != null ? '<dt>Trend score</dt><dd data-f="score">' + n.score.toFixed(1) + '</dd>' : '') + '</dl>' +
+    (n.progress != null ? '<div class="progress"><span data-f="progressText">' + progressText(n) + '</span><div class="bar"><div data-f="progressBar" style="width:' + (n.progress * 100).toFixed(1) + '%"></div></div></div>' : '') +
+    '<div class="changes">' + ['m5', 'h1', 'h24'].map(k => '<div><small>Δ ' + { m5: '5m', h1: '1h', h24: '24h' }[k] + '</small><span data-f="chg_' + k + '" class="' + cls(n.chg[k]) + '">' + pct(n.chg[k]) + '</span></div>').join('') + '</div>' +
+    '<div><div class="ratio"><div data-f="ratio" style="width:' + (tx ? 100 * n.buys5 / tx : 50) + '%"></div></div>' +
+    '<div class="ratio-labels"><span class="up" data-f="buys">5m buys ' + n.buys5 + '</span><span class="down" data-f="sells">sells ' + n.sells5 + '</span></div></div>' +
     '<div class="links">' +
       (n.program === 'pump' ? '<a href="https://pump.fun/coin/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Pump.fun ↗</a>' : '') +
       '<a href="https://dexscreener.com/solana/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">DexScreener ↗</a>' +
@@ -1237,6 +1302,23 @@ function renderPool(refreshOnly) {
     '<div class="label">Live swaps</div><div class="tape" id="tape"><div class="empty">Loading swaps…</div></div>';
   $('closePool').addEventListener('click', () => select(null));
   if (tradeFor === n.addr) renderTape(refreshOnly);
+}
+const progressText = n => n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation';
+// in-place refresh of every number in the open pool panel
+function refreshPool(n) {
+  const el = $('poolPanel');
+  if (!el._f) el._f = {};
+  const f = k => { const c = el._f[k]; if (c && c.isConnected) return c; return (el._f[k] = el.querySelector('[data-f="' + k + '"]')); };
+  const tx = n.buys5 + n.sells5;
+  const put = (k, t) => { const e = f(k); if (e) setT(e, t); };
+  put('vol24', usd(n.vol24)); put('vol1', usd(n.vol1)); put('vol5', usd(n.vol5));
+  put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
+  if (n.progress != null) { put('progressText', progressText(n)); const b = f('progressBar'); if (b) setS(b, 'width', (n.progress * 100).toFixed(1) + '%'); }
+  for (const k of ['m5', 'h1', 'h24']) { const e = f('chg_' + k); if (e) { setT(e, pct(n.chg[k])); setC(e, cls(n.chg[k])); } }
+  const r = f('ratio'); if (r) setS(r, 'width', (tx ? 100 * n.buys5 / tx : 50).toFixed(1) + '%');
+  put('buys', '5m buys ' + n.buys5); put('sells', 'sells ' + n.sells5);
+  if (n.born) put('age', 'age ' + ago(n.born));
+  updatePoolValues(n);
 }
 function updatePoolValues(n) {
   if (state.selected !== n) return;
@@ -1284,7 +1366,8 @@ function setView(v) {
   $('colBtn').hidden = !list;
   if (!list) openColPanel(false);
   tip.hidden = true;
-  if (list) renderList();
+  if (list) { removeDead(true); renderList(); }
+  else { layoutClusters(); sim.nodes(nodes); sim.alpha(0.6); startFrames(); }
 }
 segment('viewSeg', setView);
 function syncControls() {
@@ -1310,7 +1393,7 @@ document.addEventListener('keydown', e => {
 // ---------- boot ----------
 restoreSettings(); syncControls(); renderHead(); renderHiddenBtn(); setView(state.view);
 resize(); applyListUi();
-requestAnimationFrame(frame);
+startFrames();
 setInterval(() => {
   if (state.group) layoutClusters(); // pools grow, shrink and leave between data updates
   renderStatus();

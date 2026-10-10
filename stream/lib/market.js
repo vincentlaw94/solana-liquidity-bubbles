@@ -53,7 +53,10 @@ export class Market {
     let p = this.pools.get(id);
     if (!p) {
       p = { id, program, platform: null, mint: null, quoteMint: null, baseDec: null, quoteDec: null, ready: false, pending: [],
-            quoteRes: 0, price: 0, progress: null, fundTarget: null, graduated: false, firstSeen: Date.now(), lastTs: 0, w5: [], mins: [], hours: [], tape: [] };
+            quoteRes: 0, price: 0, progress: null, fundTarget: null, graduated: false, firstSeen: Date.now(), lastTs: 0, lastEventAt: Date.now(),
+            // 5-minute window as an array with a moving head, plus running totals kept in step with it
+            w5: [], w5h: 0, buys: 0, sells: 0, vol5: 0, wallets: new Map(), // wallet -> { q, nb, ns }
+            mins: [], vol60: 0, hours: [], vol24: 0, tape: [] };
       if (program === 'pump') Object.assign(p, { mint: id.slice(5), quoteMint: SOL, baseDec: 6, quoteDec: 9, baseSupply: PUMP_SUPPLY, ready: true });
       this.pools.set(id, p);
       // PumpSwap has a long tail of near-dead pools: only spend RPC on ones that keep trading
@@ -115,6 +118,7 @@ export class Market {
     if (ev.kind === 'trade') {
       const p = this.pool(ev.pool, ev.program);
       ev.at = Date.now();
+      p.lastEventAt = ev.at;
       if (p.ready) this.apply(p, ev);
       else if (p.pending.length < 50) p.pending.push(ev);
       else this.counts.unresolvedDrops++;
@@ -179,20 +183,50 @@ export class Market {
     // px / r: pool price and quote reserve right after this swap, so each swap carries its own valuation
     const t = { t: ev.at, b: ev.buy, q: quote, x: base, px: p.price, r: p.quoteRes, w: ev.user, s: ev.sig, sl: ev.slot || null, ct: ev.ts ? ev.ts * 1000 : null };
     p.w5.push(t);
+    if (t.b) p.buys++; else p.sells++;
+    p.vol5 += quote;
+    if (t.w) {
+      const w = p.wallets.get(t.w) || p.wallets.set(t.w, { q: 0, nb: 0, ns: 0 }).get(t.w);
+      w.q += quote; if (t.b) w.nb++; else w.ns++;
+    }
     p.tape.push(t); if (p.tape.length > TAPE) p.tape.shift();
     const minute = Math.floor(ev.at / 60e3);
     let bucket = p.mins[p.mins.length - 1];
     if (!bucket || bucket.m !== minute) p.mins.push(bucket = { m: minute, open: p.price, q: 0 });
-    bucket.q += quote;
+    bucket.q += quote; p.vol60 += quote;
     const hour = Math.floor(ev.at / 3600e3);
     let hb = p.hours[p.hours.length - 1];
     if (!hb || hb.h !== hour) p.hours.push(hb = { h: hour, open: p.price, q: 0 });
-    hb.q += quote;
+    hb.q += quote; p.vol24 += quote;
     p.lastTs = ev.at;
     this.counts.trades++;
     if (replay) return;
     this.outbox.push({ p: p.id, t });
     this.onTrade?.();
+  }
+
+  // Drop swaps and buckets that left their windows, keeping the running totals in step. Cost is
+  // proportional to what expired, not to the window size.
+  prune(p, now) {
+    const w5 = p.w5;
+    let h = p.w5h;
+    while (h < w5.length && w5[h].t < now - W5) {
+      const t = w5[h++];
+      if (t.b) p.buys--; else p.sells--;
+      p.vol5 -= t.q;
+      if (t.w) {
+        const w = p.wallets.get(t.w);
+        if (w) { w.q -= t.q; if (t.b) w.nb--; else w.ns--; if (w.nb + w.ns <= 0) p.wallets.delete(t.w); }
+      }
+    }
+    if (h === w5.length) { p.w5 = []; p.w5h = 0; p.vol5 = 0; p.buys = p.sells = 0; p.wallets.clear(); } // empty window: reset (also clears float drift)
+    else if (h > 256 && h * 2 > w5.length) { p.w5 = w5.slice(h); p.w5h = 0; } // compact now and then
+    else p.w5h = h;
+    const minuteNow = Math.floor(now / 60e3), hourNow = Math.floor(now / 3600e3);
+    while (p.mins.length && p.mins[0].m < minuteNow - 59) p.vol60 -= p.mins.shift().q;
+    if (!p.mins.length) p.vol60 = 0;
+    while (p.hours.length && p.hours[0].h < hourNow - 23) p.vol24 -= p.hours.shift().q;
+    if (!p.hours.length) p.vol24 = 0;
   }
 
   venue(p) {
@@ -209,28 +243,17 @@ export class Market {
 
   // Flat view of every priced pool; the server picks a subset per client.
   rows() {
-    const now = Date.now(), minuteNow = Math.floor(now / 60e3), out = [];
+    const now = Date.now(), out = [];
     for (const p of this.pools.values()) {
       if (!p.ready) continue;
       if (p.program === 'pump' && p.graduated) continue; // a completed curve is frozen; the coin lives on in its AMM pool
-      while (p.w5.length && p.w5[0].t < now - W5) p.w5.shift();
-      while (p.mins.length && p.mins[0].m < minuteNow - 59) p.mins.shift();
-      while (p.hours.length && p.hours[0].h < Math.floor(now / 3600e3) - 23) p.hours.shift();
+      this.prune(p, now);
       const qUsd = this.prices.get(p.quoteMint);
       if (!qUsd || !(p.quoteRes > 0)) continue;
       const m = this.meta.get(p.mint) || {}, qm = this.meta.get(p.quoteMint) || {};
-      let buys = 0, sells = 0, vol5 = 0;
-      const wallets = new Map(); // wallet -> { q, b, s }
-      for (const t of p.w5) {
-        if (t.b) buys++; else sells++;
-        vol5 += t.q;
-        if (!t.w) continue;
-        const w = wallets.get(t.w) || wallets.set(t.w, { q: 0, b: false, s: false }).get(t.w);
-        w.q += t.q; if (t.b) w.b = true; else w.s = true;
-      }
-      const vol60 = p.mins.reduce((s, x) => s + x.q, 0);
-      const vol24 = p.hours.reduce((s, x) => s + x.q, 0);
-      const first5 = p.w5[0]?.px, first60 = p.mins[0]?.open, first24 = p.hours[0]?.open;
+      const buys = p.buys, sells = p.sells, vol5 = Math.max(0, p.vol5), wallets = p.wallets;
+      const vol60 = Math.max(0, p.vol60), vol24 = Math.max(0, p.vol24);
+      const first5 = p.w5[p.w5h]?.px, first60 = p.mins[0]?.open, first24 = p.hours[0]?.open;
       const flip = MAJORS.has(p.mint) && !MAJORS.has(p.quoteMint);
       const tok = flip ? qm : m, other = flip ? m : qm, tokMint = flip ? p.quoteMint : p.mint, otherMint = flip ? p.mint : p.quoteMint;
       // on PumpSwap keep only tokens that graduated from a launchpad: pump.fun mints end in "pump",
@@ -278,7 +301,7 @@ export class Market {
       if (wallets.size / trades <= GENUINE.washWalletRatio) f.push('Wash trading: ' + wallets.size + ' wallets made ' + trades + ' trades in 5m');
       let top = null;
       for (const w of wallets.values()) if (!top || w.q > top.q) top = w;
-      if (top && top.b && top.s && vol5 > 0 && top.q / vol5 > GENUINE.selfTradeShare) f.push('Self-trading: one wallet bought and sold ' + Math.round(100 * top.q / vol5) + '% of 5m volume');
+      if (top && top.nb && top.ns && vol5 > 0 && top.q / vol5 > GENUINE.selfTradeShare) f.push('Self-trading: one wallet bought and sold ' + Math.round(100 * top.q / vol5) + '% of 5m volume');
     }
     return f;
   }
@@ -315,9 +338,12 @@ export class Market {
   }
 
   evict() {
-    const cutoff = Date.now() - 30 * 60e3;
+    const now = Date.now(), cutoff = now - 30 * 60e3, unresolvedCutoff = now - 10 * 60e3;
     for (const [id, p] of this.pools) {
       if (p.ready && p.lastTs < cutoff && (!p.created || p.created < cutoff)) this.pools.delete(id);
+      // pools that never got enough trades to be looked up: forget them after 10 quiet minutes
+      else if (!p.ready && !p.resolving && p.lastEventAt < unresolvedCutoff) this.pools.delete(id);
+      else if (p.ready) this.prune(p, now); // frees memory held by expired swaps of pools no list shows
     }
   }
 }

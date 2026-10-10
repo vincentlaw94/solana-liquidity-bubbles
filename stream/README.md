@@ -62,9 +62,15 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
   - `new`: pools whose creation the server saw on-chain in the last hour, newest first
-- `WS /ws`: the dashboard protocol
-  - server → client: `pools` every 2s (with its `list`), `trades` every 250ms (only pools on that client's map), `event` (launches and graduations), `tape`
+- `WS /ws`: the dashboard protocol (permessage-deflate compressed)
+  - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a
+    pool's static fields (names, logo, addresses), sent once and again only if they change; `d` carries its live
+    fields, sent only when one changed. A missing field means empty/zero. `reset: true` starts a fresh list.
+  - `trades` (as each swap is decoded): `{p, t, b, u, pr, mc, lq}` per swap (pool, time, buy, USD size, and the
+    pool's price, market cap and liquidity right after it); swaps of the client's open pool also carry `s` (tx) and `w` (wallet)
+  - `stats` every 2s, `event` (launches and graduations), `tape` (recent swaps of a newly opened pool)
   - client → server: `{type:"config", list, limit, minLiq, genuine}`, `{type:"select", id}`
+- `GET /api/stats` → `perf`: ranking tick time, bytes per second per client (before and after compression), memory, CPU
   - `genuine` defaults to true: flagged pools are left out unless you pass `genuine=false`
 
 Each pool row carries `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,

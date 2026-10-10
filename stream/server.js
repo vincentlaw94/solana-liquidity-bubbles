@@ -27,7 +27,21 @@ const accounts = createAccountLoader(rpc);
 const meta = createTokenMeta();
 const prices = createPrices();
 const clients = new Set();
-const broadcast = msg => { const s = JSON.stringify(msg); for (const c of clients) if (c.ws.readyState === 1) c.ws.send(s); };
+// performance counters, reported under /api/stats -> perf
+const perf = { tickMs: [], rowsMs: [] };
+// average over connected clients of (that client's count / seconds it has been connected)
+function perClientRate(get) {
+  if (!clients.size) return 0;
+  let sum = 0;
+  for (const c of clients) sum += get(c) / Math.max(1, (Date.now() - c.at) / 1000);
+  return Math.round(sum / clients.size);
+}
+function sendTo(c, type, payload) {
+  if (c.ws.readyState !== 1) return;
+  c.bytes[type] = (c.bytes[type] || 0) + payload.length;
+  c.ws.send(payload);
+}
+const broadcast = msg => { const s = JSON.stringify(msg); for (const c of clients) sendTo(c, msg.type, s); };
 const market = new Market({ accounts, meta, prices, emit: broadcast, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
 
 // ---- ingest ----
@@ -142,7 +156,22 @@ function stats() {
       chainMs: percentiles(lat.chain),
       rankEveryMs: RANK_MS,
     },
+    perf: {
+      tickMs: percentiles(perf.tickMs), rowsMs: percentiles(perf.rowsMs), rows: latestRows.length, clients: clients.size,
+      // bytes per second per connected client, by message type
+      outBytesPerSecPerClient: Object.fromEntries(['pools', 'trades', 'stats', 'event', 'tape'].map(k => [k, perClientRate(c => c.bytes[k] || 0)])),
+      wireBytesPerSecPerClient: perClientRate(c => c.ws._socket?.bytesWritten || 0), // after compression
+      heapMB: Math.round(process.memoryUsage().heapUsed / 1048576), rssMB: Math.round(process.memoryUsage().rss / 1048576),
+      cpuPct: cpuPct(),
+    },
   };
+}
+
+let cpuLast = process.cpuUsage(), cpuAt = Date.now(), cpuVal = 0;
+function cpuPct() {
+  const now = Date.now();
+  if (now - cpuAt >= 2000) { const d = process.cpuUsage(cpuLast); cpuVal = +((d.user + d.system) / 1000 / (now - cpuAt) * 100).toFixed(1); cpuLast = process.cpuUsage(); cpuAt = now; }
+  return cpuVal;
 }
 
 // rolling latency samples (last 2000 swaps)
@@ -155,15 +184,72 @@ function percentiles(arr) {
 }
 
 let latestRows = [];
-setInterval(() => {
-  latestRows = market.rows();
-  const s = stats();
-  for (const c of clients) {
-    const pools = pick(latestRows, c.cfg, c.selected);
-    c.visible = new Set(pools.map(p => p.id));
-    if (c.ws.readyState === 1) c.ws.send(JSON.stringify({ type: 'pools', list: c.cfg.list, pools, stats: s }));
+
+// ---- list snapshots as deltas ----
+// A coin's static fields (names, logo, addresses) go to a client once, and again only if they change;
+// its live fields are re-sent only when one of them changed since that client last received them.
+const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen'];
+const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs'];
+const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
+function encode(r, keys) {
+  const o = { id: r.id };
+  for (const k of keys) {
+    const v = r[k];
+    if (v == null || v === '' || v === false || (Array.isArray(v) && !v.length)) continue; // absent = empty
+    o[k] = typeof v === 'number' && isFinite(v) && !Number.isInteger(v) ? r6(v) : v;
   }
+  return JSON.stringify(o);
+}
+let encoded = new Map(); // id -> { s, d } JSON strings, rebuilt once per tick and shared by all clients
+function encodedFor(r) {
+  let e = encoded.get(r.id);
+  if (!e) encoded.set(r.id, e = { s: encode(r, STATIC), d: encode(r, DYNAMIC) });
+  return e;
+}
+function snapshotFor(c, pools, reset) {
+  if (reset) { c.sentS = new Map(); c.sentD = new Map(); }
+  const s = [], d = [];
+  for (const r of pools) {
+    const e = encodedFor(r);
+    if (c.sentS.get(r.id) !== e.s) { c.sentS.set(r.id, e.s); s.push(e.s); }
+    if (c.sentD.get(r.id) !== e.d) { c.sentD.set(r.id, e.d); d.push(e.d); }
+  }
+  // forget coins that left this client's list so they are re-sent in full if they come back
+  if (c.sentS.size > pools.length * 2) {
+    const keep = new Set(pools.map(r => r.id));
+    for (const id of c.sentS.keys()) if (!keep.has(id)) { c.sentS.delete(id); c.sentD.delete(id); }
+  }
+  if (!reset && !s.length && !d.length && c.lastOrder === pools.map(r => r.id).join()) return null; // nothing changed
+  c.lastOrder = pools.map(r => r.id).join();
+  return '{"type":"pools","list":' + JSON.stringify(c.cfg.list) + (reset ? ',"reset":true' : '') +
+    ',"order":' + JSON.stringify(pools.map(r => r.id)) + ',"s":[' + s.join(',') + '],"d":[' + d.join(',') + ']}';
+}
+// clients with the same list settings share one ranking per tick
+let pickCache = new Map();
+function pickShared(cfg, selected) {
+  const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + (cfg.venues || '');
+  let base = pickCache.get(key);
+  if (!base) pickCache.set(key, base = pick(latestRows, cfg, null));
+  if (selected && !base.some(r => r.id === selected)) { const sr = latestRows.find(r => r.id === selected); if (sr) return base.concat(sr); }
+  return base;
+}
+setInterval(() => {
+  const t0 = performance.now();
+  latestRows = market.rows();
+  sample(perf.rowsMs, performance.now() - t0);
+  encoded = new Map(); pickCache = new Map();
+  for (const c of clients) pushPools(c, false);
+  sample(perf.tickMs, performance.now() - t0);
 }, RANK_MS);
+function pushPools(c, reset) {
+  const pools = pickShared(c.cfg, c.selected);
+  c.visible = new Set(pools.map(p => p.id));
+  const msg = snapshotFor(c, pools, reset);
+  if (msg) sendTo(c, 'pools', msg);
+}
+// server stats change slowly and are bulky: their own message every 2s
+setInterval(() => { if (clients.size) broadcast({ type: 'stats', stats: stats() }); }, 2000);
 
 // Swaps go out as soon as they are decoded. setImmediate coalesces a burst that arrives in the same
 // event-loop turn (one websocket frame can carry several) into one message, without adding a timer delay.
@@ -177,10 +263,16 @@ market.onTrade = () => {
     if (!trades.length) return;
     const now = Date.now();
     for (const t of trades) { sample(lat.push, now - t.t); if (t.ct) sample(lat.chain, t.t - t.ct); }
+    // what a list row needs: pool, time, side, USD size, and the pool's price / market cap / liquidity after it
+    const light = t => ({ p: t.p, t: t.t, b: t.b, u: t.u == null ? null : r6(t.u), pr: t.pr == null ? null : r6(t.pr), mc: t.mc == null ? null : r6(t.mc), lq: t.lq == null ? null : r6(t.lq) });
     for (const c of clients) {
       if (c.ws.readyState !== 1) continue;
-      const mine = trades.filter(t => c.visible.has(t.p) || t.p === c.selected);
-      if (mine.length) c.ws.send(JSON.stringify({ type: 'trades', trades: mine }));
+      const mine = [];
+      for (const t of trades) {
+        if (t.p === c.selected) mine.push({ ...light(t), s: t.s, w: t.w }); // the open pool's tape shows wallet + tx
+        else if (c.visible.has(t.p)) mine.push(light(t));
+      }
+      if (mine.length) sendTo(c, 'trades', JSON.stringify({ type: 'trades', trades: mine }));
     }
   });
 };
@@ -210,7 +302,7 @@ const server = http.createServer(async (req, res) => {
         id: p.id, program: p.program, ready: p.ready, resolving: !!p.resolving, pendingTrades: p.pending.length,
         graduated: p.graduated, successor: p.successor || null, mint: p.mint, quoteMint: p.quoteMint,
         baseSupply: p.baseSupply ?? null, quoteSupply: p.quoteSupply ?? null, quoteReserve: p.quoteRes, priceInQuote: p.price,
-        quoteUsd: prices.get(p.quoteMint) ?? null, trades5m: p.w5.length, lastTradeSecAgo: p.lastTs ? Math.round((Date.now() - p.lastTs) / 1000) : null,
+        quoteUsd: prices.get(p.quoteMint) ?? null, trades5m: p.buys + p.sells, lastTradeSecAgo: p.lastTs ? Math.round((Date.now() - p.lastTs) / 1000) : null,
         listed: !!row, flags: row?.flags || null,
         why: row ? (row.genuine ? 'listed' : 'hidden by the genuine filter') : !p.ready ? 'waiting for its pool lookup' :
           p.program === 'pump' && p.graduated ? 'graduated: trading moved to its AMM pool' : 'not priced yet or filtered out',
@@ -238,19 +330,20 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+// permessage-deflate: list snapshots are repetitive JSON and compress well; small swap messages skip it
+const wss = new WebSocketServer({ server, path: '/ws', perMessageDeflate: { threshold: 512, zlibDeflateOptions: { level: 3 } } });
 wss.on('connection', ws => {
-  const c = { ws, cfg: readConfig({}), selected: null, visible: new Set() };
+  const c = { ws, cfg: readConfig({}), selected: null, visible: new Set(), sentS: new Map(), sentD: new Map(), lastOrder: '', at: Date.now(), bytes: {} };
   clients.add(c);
-  const send = m => ws.readyState === 1 && ws.send(JSON.stringify(m));
-  const pushPools = () => { const pools = pick(latestRows, c.cfg, c.selected); c.visible = new Set(pools.map(p => p.id)); send({ type: 'pools', list: c.cfg.list, pools, stats: stats() }); };
+  const send = m => sendTo(c, m.type, JSON.stringify(m));
   send({ type: 'hello', programs: SUBSCRIBED });
-  pushPools();
+  send({ type: 'stats', stats: stats() });
+  pushPools(c, true);
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
     if (m.type === 'config') {
       c.cfg = readConfig(m);
-      pushPools();
+      pushPools(c, true);
     } else if (m.type === 'select') {
       c.selected = typeof m.id === 'string' ? m.id : null;
       if (c.selected) send({ type: 'tape', id: c.selected, trades: market.tape(c.selected) });
