@@ -43,9 +43,7 @@ header {
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
   padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
-.brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
-.brand h1 { font: 700 20px/1 var(--display); letter-spacing: -0.01em; margin: 0; }
-.brand span { color: var(--muted); font-size: 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .rpc-info { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; }
 .rpc-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); cursor: help; white-space: nowrap; }
@@ -57,7 +55,7 @@ header {
 .dot.err { background: var(--sell); box-shadow: none; animation: none; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(46,211,163,.6); } 70% { box-shadow: 0 0 0 8px rgba(46,211,163,0); } 100% { box-shadow: 0 0 0 0 rgba(46,211,163,0); } }
 
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .seg button { background: transparent; border: 0; padding: 5px 10px; cursor: pointer; color: var(--muted); font-size: 12px; }
 .seg button + button { border-left: 1px solid var(--line); }
@@ -181,6 +179,20 @@ table.pools td, .kv dd { transition: color .5s; }
 .flags.bundler { border-color: var(--sell); background: rgba(255,100,112,.08); }
 .flags.bundler b { color: var(--sell); display: inline-flex; align-items: center; gap: 6px; }
 .flags.bundler b svg { width: 14px; height: 14px; }
+.bundle-box { display: grid; gap: 8px; }
+.bundle-box .bsum { font-size: 12px; color: var(--muted); }
+.bundle-box .bsum b { color: var(--fg); font-weight: 600; }
+.bundle-box .bsum b.hot { color: var(--sell); }
+table.bw { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+table.bw th { font-weight: 500; color: var(--muted); text-align: right; padding: 2px 4px; }
+table.bw td { text-align: right; padding: 2px 4px; border-top: 1px solid var(--line); white-space: nowrap; }
+table.bw th:first-child, table.bw td:first-child, table.bw th:nth-child(2), table.bw td:nth-child(2) { text-align: left; }
+table.bw a { color: inherit; }
+.role { font-size: 10.5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+.role.creator, .role.bundle { border-color: var(--sell); color: var(--sell); }
+.role.otherBundle, .role.linked { border-color: var(--accent); color: var(--accent); }
+.kb { color: var(--sell); cursor: help; margin-left: 3px; }
+.bundle-box .blist { font-size: 11.5px; color: var(--muted); display: grid; gap: 2px; }
 .warn-mark { color: var(--accent); font-size: 13px; cursor: help; flex: none; }
 .flags { display: grid; gap: 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--accent); background: rgba(243,179,61,.08); font-size: 12px; }
 .flags b { color: var(--accent); font-weight: 500; }
@@ -225,6 +237,11 @@ table.pools tbody tr[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--acc
 .copy:hover, .copy:focus-visible { color: var(--fg); border-color: var(--line); background: var(--raise); }
 .copy svg { width: 14px; height: 14px; }
 .copy.done { color: var(--buy); }
+.links-slot { display: inline-flex; gap: 0; }
+.links-slot:empty { display: none; }
+a.tl { display: inline-grid; place-items: center; width: 22px; height: 24px; border-radius: 5px; color: var(--muted); border: 1px solid transparent; }
+a.tl:hover, a.tl:focus-visible { color: var(--fg); border-color: var(--line); background: var(--raise); }
+a.tl svg { width: 13px; height: 13px; }
 .ca { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
 .ca .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; flex: none; }
 .ca code { font: 12px/1.3 var(--mono); color: var(--fg); overflow-wrap: anywhere; user-select: all; min-width: 0; }
@@ -257,7 +274,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 </head>
 <body>
 <header>
-  <div class="brand"><h1>Solana Liquidity Bubbles</h1><span>DEX pools · bubble area = pool liquidity (USD)</span></div>
+  <h1 class="sr-only">Solana Liquidity Bubbles</h1>
   <div class="status" role="status" aria-live="polite"><span class="dot warn" id="dot"></span><span id="statusText">Connecting…</span></div>
   <div class="rpc-info" id="rpcInfo" hidden></div>
   <div class="controls">
@@ -456,7 +473,10 @@ function fromStream(r, i) {
     mint: r.mint,
     deployer: r.deployer || null,
     holders: r.holders ?? null,
+    links: r.links || null, // { x, web, tg } set by the coin's creator (unverified)
     bundler: r.deployerBundler ? { launches: r.bundlerLaunches, pnl: r.bundlerPnl } : null,
+    // launch bundle found by the server (absent fields are zero; none at all: launch not seen, or nobody bought alongside)
+    bundle: r.bundledPct || r.block0Pct ? { pct: r.bundledPct || 0, block0: r.block0Pct || 0, held: r.bundleHeldPct || 0, wallets: r.bundleWallets || 0, funded: r.bundleFunded || 0, est: !!r.bundleEst } : null,
   };
 }
 function ingestRecords(records, final = true) {
@@ -912,7 +932,7 @@ cv.addEventListener('mousemove', e => {
     '<dt>5m trades</dt><dd><span class="up">' + n.buys5 + '</span> / <span class="down">' + n.sells5 + '</span></dd>' +
     '<dt>Δ 5m · 1h</dt><dd><span class="' + cls(n.chg.m5) + '">' + pct(n.chg.m5) + '</span> · <span class="' + cls(n.chg.h1) + '">' + pct(n.chg.h1) + '</span></dd>' +
     '<dt>Δ 24h</dt><dd class="' + cls(n.chg.h24) + '">' + pct(n.chg.h24) + '</dd></dl>' +
-    (n.bundler ? '<div class="tip-flags" style="color:var(--sell)">' + esc(bundlerText(n)) + '</div>' : '') +
+    (redFlagText(n) ? '<div class="tip-flags" style="color:var(--sell)">' + esc(redFlagText(n)).replace(/\n/g, '<br>') + '</div>' : '') +
     (n.flags.length ? '<div class="tip-flags">⚠ ' + n.flags.map(esc).join('<br>⚠ ') + '</div>' : '');
   tip.hidden = false;
   const tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -965,6 +985,98 @@ function bundlerText(n) {
   const b = n.bundler;
   return 'Deployer ' + short(n.deployer) + ' is a known bundler wallet on isitbundled.com' +
     (b.launches ? ' (' + b.launches + ' launches' + (b.pnl != null ? ', ' + Math.round(b.pnl).toLocaleString() + ' SOL realized PnL' : '') + ')' : '');
+}
+
+// ---------- launch bundle (this server's detector: Jito bundles, or rebuilt from the launch block) ----------
+const pct1 = v => (v >= 10 ? Math.round(v) : +v.toFixed(1)) + '%';
+const bundleLabel = b => (b.est ? '≈' : '') + pct1(b.pct);
+function bundleTitle(b) {
+  return (b.est ? 'Estimate until Jito or the launch block confirms which buys were bundled. ' : '') +
+    pct1(b.pct) + ' of supply bought in the launch slot by the creator and wallets bundled with it' +
+    ' · launch slot total ' + pct1(b.block0) + ' · ' + (b.wallets ? b.wallets + ' bundle wallet' + (b.wallets > 1 ? 's' : '') + ' · ' : '') +
+    (b.funded ? b.funded + ' wallets funded together · ' : '') + 'insiders hold ' + pct1(b.held) + ' now';
+}
+const ROLE = { creator: 'Creator', bundle: 'Bundled', otherBundle: 'Other bundle', linked: 'Funding-linked', block0: 'Launch slot', 'block0?': 'Launch slot', sniper: 'Sniper' };
+const ROLE_TIP = {
+  linked: 'An early buyer funded together with the creator or a bundle wallet', creator: 'Created the coin', bundle: 'Bought in the same Jito bundle as the creation', otherBundle: 'Bought in a coordinated bundle in the launch slot: several buys in one bundle, or one of several bundles paying the identical tip',
+  block0: 'Bought in the launch slot, not bundled with the creation', 'block0?': 'Bought in the launch slot (not checked yet)', sniper: 'First bought within 5 slots (~2s) of the launch',
+};
+const SOURCE = { jito: 'confirmed via Jito', rebuilt: 'rebuilt from the launch block', solo: 'nobody bought alongside the creator', unverified: 'estimate (not confirmed)', watching: 'estimate, checking…' };
+const ago2 = ms => ms < 3600e3 ? Math.max(1, Math.round(ms / 60e3)) + 'm' : ms < 86400e3 ? Math.round(ms / 3600e3) + 'h' : Math.round(ms / 86400e3) + 'd';
+function fundingCell(f) {
+  if (f === undefined || f === null) return '<span title="Not traced yet">…</span>';
+  if (f.old) return '<span title="Over 3,000 transactions of history: funding not traced">old wallet</span>';
+  if (f.none) return '<span title="No incoming SOL found in its oldest transactions">–</span>';
+  const when = f.beforeLaunchMin != null ? (f.beforeLaunchMin >= 0 ? ago2(f.beforeLaunchMin * 60e3) + ' before' : ago2(-f.beforeLaunchMin * 60e3) + ' after') : '';
+  return '<a href="https://solscan.io/account/' + encodeURIComponent(f.from) + '" target="_blank" rel="noopener" title="' +
+    esc(f.sol + ' SOL from ' + f.from + (f.busy ? ' (a busy wallet: exchange, bridge or service)' : '')) + '">' + esc(short(f.from)) + '</a>' +
+    (f.busy ? ' <small title="Busy funder: exchange, bridge or service">ex</small>' : '') + ' <small>' + esc(when) + '</small>';
+}
+let bundleFor = null;
+async function loadBundle(n) {
+  const box = $('bundleBox');
+  if (!box || !n?.mint) return;
+  bundleFor = n.mint;
+  let r = null, status = 0;
+  try { const res = await fetch(IMG_BASE + '/api/bundle?mint=' + encodeURIComponent(n.mint)); status = res.status; r = await res.json(); } catch {}
+  if (bundleFor !== n.mint || !box.isConnected) return;
+  if (status === 202) {
+    const b = r.backfill;
+    setH(box, '<div class="label">Launch bundle</div><div class="bsum">' + (b.state === 'queued' ? 'Queued: this coin launched before the server started, so its launch will be read from chain history.' :
+      'Reading this coin\u2019s launch from chain history: ' + esc(b.step || '') + '…') + '</div>');
+    return;
+  }
+  if (status !== 200 || !r) {
+    const why = r?.error && status === 404 ? 'This server didn\u2019t see the coin\u2019s launch' + (n.program === 'pump' || /pump$/.test(n.mint) ? '.' : ' (only pump.fun launches can be read from history).') : 'Couldn\u2019t load the launch report.';
+    setH(box, '<div class="label">Launch bundle</div><div class="bsum">' + why + '</div>'); return;
+  }
+  const w = r.wallets.filter(x => x.got > 0).slice(0, 12);
+  const known = k => k ? '<span class="kb" title="' + esc('Known bundler: ' + [k.ours ? 'caught in ' + k.ours + ' other launch' + (k.ours > 1 ? 'es' : '') + ' here' : '', k.isitbundled ? 'on isitbundled.com' + (k.isitbundled !== true ? ' (' + k.isitbundled + ' launches)' : '') : ''].filter(Boolean).join(', ')) + '">⚑</span>' : '';
+  setH(box, '<div class="label">Launch bundle · ' + esc(SOURCE[r.status] || r.status) + '</div>' +
+    '<div class="bsum">Bundled <b class="' + (r.bundledPct >= 20 ? 'hot' : '') + '">' + (r.est ? '≈' : '') + pct1(r.bundledPct) + '</b> · launch slot <b>' + pct1(r.block0Pct) + '</b> · dev <b>' + pct1(r.devPct) + '</b>' +
+      (r.sniperPct ? ' · snipers <b>' + pct1(r.sniperPct) + '</b>' : '') + '<br>Insiders hold <b>' + pct1(r.heldPct) + '</b> now' +
+      (r.soldShare != null ? ', ' + (r.backfilled ? 'sold or moved' : 'sold') + ' <b>' + pct1(r.soldShare) + '</b> of what they got' : '') + (r.knownBundlers ? ' · <b class="hot">' + r.knownBundlers + ' known bundler' + (r.knownBundlers > 1 ? 's' : '') + '</b>' : '') +
+      (r.fundedTogether?.length ? '<br>Funded together: ' + r.fundedTogether.map(g => '<b class="hot">' + g.wallets.length + ' wallets</b> (' + esc(g.why.join(', ')) +
+        (g.beforeLaunchMin != null ? ', ' + ago2(Math.abs(g.beforeLaunchMin) * 60e3) + (g.beforeLaunchMin >= 0 ? ' before launch' : ' after launch') : '') + ')').join(' · ') : '') +
+      (r.fundingState === 'queued' || r.fundingState === 'tracing' || r.fundingState === 'waiting' ? '<br><small>Tracing wallet funding…</small>' : '') +
+      (r.backfilled ? '<br><small>Launched before the server started: rebuilt from chain history.</small>' : '') + '</div>' +
+    (w.length ? '<table class="bw"><thead><tr><th>Wallet</th><th>Role</th><th title="% of supply bought">Got</th><th title="% of supply sold">Sold</th><th title="% of supply still held (swaps seen here; transfers are not followed)">Holds</th><th title="Slots after the creation">Slot</th><th title="Where its first SOL came from, and when">Funded by</th></tr></thead><tbody>' +
+      w.map(x => '<tr><td>' + (x.wallet ? '<a href="https://solscan.io/account/' + encodeURIComponent(x.wallet) + '" target="_blank" rel="noopener">' + esc(short(x.wallet)) + '</a>' : '–') + known(x.known) + '</td>' +
+        '<td><span class="role ' + esc(x.role.replace('?', '')) + '" title="' + esc(ROLE_TIP[x.role] || '') + '">' + esc(ROLE[x.role] || x.role) + '</span></td>' +
+        '<td>' + pct1(x.got) + '</td><td>' + (x.sold ? pct1(x.sold) : '–') + '</td><td>' + pct1(x.holds) + '</td><td>+' + x.slot + '</td><td>' + (r.fundingState === 'off' ? '–' : fundingCell(x.funding)) + '</td></tr>').join('') + '</tbody></table>' : '') +
+    (r.bundleList?.length ? '<div class="blist">' + r.bundleList.map(b => '<span>' + (b.withCreator ? 'Creation bundle' : 'Other bundle') + ' · ' + b.txs + ' tx' + (b.txs > 1 ? 's' : '') +
+      (b.tipSol != null ? ' · tip ' + b.tipSol + ' SOL' : '') + ' · ' + (b.id ? '<a href="https://explorer.jito.wtf/bundle/' + encodeURIComponent(b.id) + '" target="_blank" rel="noopener">Jito ↗</a>' : 'rebuilt from block order') + '</span>').join('') + '</div>' : ''));
+}
+// the open coin's bundle report, reloaded every 10s while the panel shows it (holdings change as insiders sell)
+setInterval(() => { if (state.selected && $('bundleBox')) loadBundle(state.selected); }, 10000);
+
+// ---------- creator links (X, website, Telegram from the coin's metadata) ----------
+const ICON_X = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M12.2 1.5h2.2L9.6 7l5.6 7.5h-4.4L7.4 10l-3.9 4.5H1.3l5.1-5.9L1 1.5h4.5l3.1 4.1zm-.8 11.7h1.2L4.6 2.8H3.3z"/></svg>';
+const ICON_WEB = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M1.8 8h12.4M8 1.7c1.8 1.9 2.6 4 2.6 6.3S9.8 12.4 8 14.3C6.2 12.4 5.4 10.3 5.4 8S6.2 3.6 8 1.7z"/></svg>';
+const ICON_TG = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M14.6 2.3 1.9 7.2c-.9.3-.8 1.1 0 1.3l3.2 1 1.2 3.8c.2.5.6.6 1 .2l1.8-1.6 3.3 2.4c.6.3 1 .1 1.2-.6l2.1-10c.2-.9-.3-1.3-1.1-1.4zM5.9 9.2l6.4-4.1-5 4.9-.2 2.4z"/></svg>';
+const safeUrl = u => typeof u === 'string' && /^https?:\/\//i.test(u) ? u : null;
+function linksHtml(n) {
+  const l = n.links;
+  if (!l) return '';
+  return [['x', 'X', ICON_X], ['web', 'Website', ICON_WEB], ['tg', 'Telegram', ICON_TG]].map(([k, label, icon]) => {
+    const u = safeUrl(l[k]);
+    return u ? '<a class="tl" href="' + esc(u) + '" target="_blank" rel="noopener noreferrer nofollow" title="' + esc(label + ' set by the coin\u2019s creator (unverified): ' + u) + '" aria-label="' + esc((n.sym || 'Coin') + ' ' + label) + '">' + icon + '</a>' : '';
+  }).join('');
+}
+// Axiom's coin page, by contract address
+const ICON_AXIOM = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.2 14 13.8H2z"/><path d="M5.3 9.6h5.4"/></svg>';
+const axiomUrl = mint => 'https://axiom.trade/meme/' + encodeURIComponent(mint) + '?chain=sol';
+const axiomHtml = n => n.mint ? '<a class="tl" href="' + esc(axiomUrl(n.mint)) + '" target="_blank" rel="noopener noreferrer" title="Open on Axiom" aria-label="Open ' + esc(n.sym || 'coin') + ' on Axiom">' + ICON_AXIOM + '</a>' : '';
+// a link click opens the link, not the row
+document.addEventListener('click', e => { if (e.target.closest('a.tl')) e.stopPropagation(); }, true);
+
+// ---------- red flag: bundler deployer, or a highly bundled launch ----------
+const HIGH_BUNDLE = 20; // % of supply bought at launch by the creator and wallets bundled with it (same as the column's red)
+const highlyBundled = n => !!(n.bundle && !n.bundle.est && n.bundle.pct >= HIGH_BUNDLE);
+const highBundleText = n => 'Highly bundled: ' + pct1(n.bundle.pct) + ' of supply bought at launch by the creator and wallets bundled with it' +
+  (n.bundle.wallets ? ' (' + n.bundle.wallets + ' bundle wallet' + (n.bundle.wallets > 1 ? 's' : '') + ')' : '') + '; insiders hold ' + pct1(n.bundle.held) + ' now';
+function redFlagText(n) {
+  return [n.bundler ? bundlerText(n) : '', highlyBundled(n) ? highBundleText(n) : ''].filter(Boolean).join('\n');
 }
 
 // ---------- hide coins ----------
@@ -1028,9 +1140,9 @@ const COLUMNS = {
   rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => { setT(td, String(ctx.rank(n) ?? '–')); } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
     init: td => {
-      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="warn-mark" hidden>⚠</span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
+      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="warn-mark" hidden>⚠</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
       td._lg = td.querySelector('.lg'); td._b = td.querySelector('b'); td._small = td.querySelector('small');
-      td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot');
+      td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot'); td._links = td.querySelector('.links-slot'); td._ax = td.querySelector('.axiom-slot');
     },
     set: (td, n) => {
       const key = (n.icon || '') + '|' + n.sym + '|' + n.dex;
@@ -1042,13 +1154,15 @@ const COLUMNS = {
         td._flags = flags; td._wm.hidden = !n.flags.length;
         if (n.flags.length) { td._wm.title = flags; td._wm.setAttribute('aria-label', 'Red flags: ' + n.flags.join('; ')); }
       }
-      const rf = n.bundler ? bundlerText(n) : '';
+      const rf = redFlagText(n);
       if (td._rfText !== rf) {
         td._rfText = rf; td._rf.hidden = !rf;
         if (rf) { td._rf.title = rf; td._rf.setAttribute('aria-label', rf); }
       }
       const mint = n.mint || '';
-      if (td._mint !== mint) { td._mint = mint; td._ca.innerHTML = copyButtonHtml(n.mint, n.sym); td._hide.innerHTML = hideButtonHtml(n); }
+      if (td._mint !== mint) { td._mint = mint; td._ca.innerHTML = copyButtonHtml(n.mint, n.sym); td._hide.innerHTML = hideButtonHtml(n); td._ax.innerHTML = axiomHtml(n); }
+      const lk = n.links ? [n.links.x, n.links.web, n.links.tg].join('|') : '';
+      if (td._lk !== lk) { td._lk = lk; td._links.innerHTML = linksHtml(n); }
     } },
   mcap: { label: 'Market cap', sort: mcapOf, set: (td, n) => { const v = mcapOf(n); tickCell(td, v, usdFine(v)); } },
   venue: { label: 'Venue', align: 'l', sort: n => prettyDex(n.dex).toLowerCase(),
@@ -1086,13 +1200,20 @@ const COLUMNS = {
     } },
   holders: { label: 'Holders', sort: n => n.holders ?? -Infinity,
     set: (td, n) => { setT(td, n.holders != null ? n.holders.toLocaleString() : '–'); if (!td.title) td.title = 'Wallets holding the coin (Jupiter, refreshed every minute)'; } },
+  bundled: { label: 'Bundled', sort: n => n.bundle?.pct ?? -1,
+    set: (td, n) => {
+      const b = n.bundle;
+      setT(td, b ? bundleLabel(b) : '–'); setC(td, b && b.pct >= 20 ? 'down' : '');
+      const t = b ? bundleTitle(b) : 'No launch bundle seen (or this server didn’t see the launch)';
+      if (td.title !== t) td.title = t;
+    } },
   coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
     set: (td, n) => {
       setT(td, n.born ? ago(n.born) : '–');
       if (td._born !== n.born) { td._born = n.born; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; }
     } },
 };
-const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
+const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
 function normalizeColumns(saved) {
   const out = [], seen = new Set();
   for (const c of Array.isArray(saved) ? saved : []) {
@@ -1381,7 +1502,7 @@ function renderLegend() {
 // The panel is rebuilt only when its structure changes (another pool, flags appear, a row comes or goes).
 // Otherwise its numbers are updated in place, so the logo and links aren't re-created twice a second.
 function poolShape(n) {
-  return [n.id, n.sym, n.name, n.dex, n.icon, n.mint, n.deployer, !!n.bundler, n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
+  return [n.id, n.sym, n.name, n.dex, n.icon, n.mint, n.deployer, !!n.bundler, !!n.bundle, highlyBundled(n), n.links ? [n.links.x, n.links.web, n.links.tg].join() : '', n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
 }
 function renderPool(refreshOnly) {
   const el = $('poolPanel'), n = state.selected;
@@ -1398,7 +1519,8 @@ function renderPool(refreshOnly) {
     (n.flags.length ? '<div class="flags"><b>⚠ Red flags</b><ul>' + n.flags.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>' : '') +
     (n.bundler ? '<div class="flags bundler"><b>' + ICON_RED_FLAG + 'Bundler deployer</b><span>' + esc(bundlerText(n)) + '. ' +
       '<a href="https://isitbundled.com/" target="_blank" rel="noopener">isitbundled.com ↗</a></span></div>' : '') +
-    (n.mint ? '<div class="ca"><span class="lbl">CA</span><code>' + esc(n.mint) + '</code>' + copyButtonHtml(n.mint, n.sym) + '</div>' : '') +
+    (highlyBundled(n) ? '<div class="flags bundler"><b>' + ICON_RED_FLAG + 'Highly bundled</b><span>' + esc(highBundleText(n)) + '.</span></div>' : '') +
+    (n.mint ? '<div class="ca"><span class="lbl">CA</span><code>' + esc(n.mint) + '</code>' + linksHtml(n) + axiomHtml(n) + copyButtonHtml(n.mint, n.sym) + '</div>' : '') +
     (n.deployer ? '<div class="ca"><span class="lbl">Dev</span><code>' + esc(n.deployer) + '</code>' + copyButtonHtml(n.deployer, 'deployer') + '</div>' : '') +
     '<dl class="kv">' +
     '<dt>Price</dt><dd id="pvPrice">' + price(n.price) + '</dd>' +
@@ -1414,12 +1536,15 @@ function renderPool(refreshOnly) {
     '<div class="changes">' + ['m5', 'h1', 'h24'].map(k => '<div><small>Δ ' + { m5: '5m', h1: '1h', h24: '24h' }[k] + '</small><span data-f="chg_' + k + '" class="' + cls(n.chg[k]) + '">' + pct(n.chg[k]) + '</span></div>').join('') + '</div>' +
     '<div><div class="ratio"><div data-f="ratio" style="width:' + (tx ? 100 * n.buys5 / tx : 50) + '%"></div></div>' +
     '<div class="ratio-labels"><span class="up" data-f="buys">5m buys ' + n.buys5 + '</span><span class="down" data-f="sells">sells ' + n.sells5 + '</span></div></div>' +
+    (n.bundle || n.program === 'pump' || /pump$/.test(n.mint || '') ? '<div class="bundle-box" id="bundleBox"><div class="label">Launch bundle</div><div class="bsum">Loading…</div></div>' : '') +
     '<div class="links">' +
       (n.program === 'pump' ? '<a href="https://pump.fun/coin/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Pump.fun ↗</a>' : '') +
+      '<a href="' + esc(axiomUrl(n.addr)) + '" target="_blank" rel="noopener">Axiom ↗</a>' +
       '<a href="https://dexscreener.com/solana/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">DexScreener ↗</a>' +
       '<a href="https://solscan.io/token/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Solscan ↗</a></div>' +
     '<div class="label">Live swaps</div><div class="tape" id="tape"><div class="empty">Loading swaps…</div></div>';
   $('closePool').addEventListener('click', () => select(null));
+  if ($('bundleBox')) loadBundle(n);
   if (tradeFor === n.addr) renderTape(refreshOnly);
 }
 const progressText = n => n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation';

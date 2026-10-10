@@ -8,7 +8,9 @@
 //      RPC_RPS, RPC_METHOD_RPS, DBC_TX_PER_SEC (2, websocket mode only),
 //      PUMPSWAP_ALL=1 to show every PumpSwap pool (default: only tokens that graduated from a launchpad)
 //      BUNDLER_DB=0 to turn off the isitbundled.com bundler-wallet flag (bundler-wallets.json),
-//      BUNDLER_REFRESH=0 to use the hardcoded list without refreshing it on start
+//      BUNDLER_REFRESH=0 to use the hardcoded list without refreshing it on start,
+//      BUNDLE_DETECT=0 to turn off this server's own launch-bundle detector (Jito + block-order fallback),
+//      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -18,8 +20,11 @@ import { WebSocketServer } from 'ws';
 import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022MetadataUri } from './lib/decode.js';
 import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
 import { loadBundlerWallets, syncBundlerWallets } from './lib/bundlers.js';
+import { createJito, createBundleDetector } from './lib/bundles.js';
+import { createFundingTracer } from './lib/funding.js';
+import { createBackfill } from './lib/backfill.js';
 import { createImageProxy } from './lib/images.js';
-import { createRpc, createFailoverRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
+import { createRpc, createFailoverRpc, patient, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
 
 const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
@@ -54,7 +59,7 @@ const rpc = HELIUS_RPC
 const accounts = createAccountLoader(rpc);
 const images = createImageProxy();
 // image fallback: the metadata link stored in a Token-2022 mint (pump.fun coins have one), read in batches
-const meta = createTokenMeta({ metadataImage: images.metadataImage, onchainUri: async mint => token2022MetadataUri((await accounts.get(mint, true))?.data) });
+const meta = createTokenMeta({ metadata: images.metadata, onchainUri: async mint => token2022MetadataUri((await accounts.get(mint, true))?.data) });
 const prices = createPrices();
 const clients = new Set();
 // performance counters, reported under /api/stats -> perf
@@ -93,7 +98,18 @@ async function refreshBundlers() {
   } finally { Object.assign(r, { running: false, finishedAt: Date.now() }); }
 }
 if (process.env.BUNDLER_DB !== '0' && process.env.BUNDLER_REFRESH !== '0') refreshBundlers();
-const market = new Market({ accounts, meta, prices, emit: broadcast, bundlers, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
+// Launch-bundle detector: which launch-slot buys were bundled with each creation (Jito's bundle explorer API,
+// falling back to rebuilding bundles from the launch block), compiled into its own wallet DB under data/.
+// getBlock isn't in the Helius methods, so the fallback uses the public RPC; so do the funding traces and the
+// backfill of coins that launched before the server started (both one at a time, open pool and listed coins first).
+const DATA_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'data');
+const BUNDLES_ON = process.env.BUNDLE_DETECT !== '0';
+const launchBundles = createBundleDetector({
+  jito: createJito(), rpc, known: w => bundlers.get(w), log, enabled: BUNDLES_ON, dataDir: DATA_DIR,
+  funding: BUNDLES_ON && process.env.FUNDING !== '0' ? createFundingTracer({ rpc: patient(rpc), dataDir: DATA_DIR, log }) : null,
+});
+const backfill = BUNDLES_ON && process.env.BACKFILL !== '0' ? createBackfill({ rpc: patient(rpc), detector: launchBundles, log }) : null;
+const market = new Market({ accounts, meta, prices, emit: broadcast, bundlers, launchBundles, pumpswapAll: process.env.PUMPSWAP_ALL === '1' });
 
 // ---- ingest ----
 const started = Date.now();
@@ -263,6 +279,7 @@ function stats() {
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
+    launchBundles: launchBundles.stats(), backfill: backfill?.stats() || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
@@ -326,9 +343,10 @@ let latestRows = [];
 // ---- list snapshots as deltas ----
 // A coin's static fields (names, logo, addresses) go to a client once, and again only if they change;
 // its live fields are re-sent only when one of them changed since that client last received them.
-const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer'];
+const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer', 'links'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV'];
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV',
+  'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -390,12 +408,25 @@ function pushPools(c, reset) {
 }
 // coins on any list that still have no image: look them up again every minute
 setInterval(() => { for (const r of latestRows) if (!r.icon) meta.request(r.mint); }, 15000);
-// holder counts for coins clients are looking at: refreshed every minute
+// holder counts for coins clients are looking at: refreshed every minute. Their launches also go first in
+// the bundle detector's queue, and only they are worth a full getBlock when Jito doesn't answer.
 setInterval(() => {
   const listed = new Set();
   for (const c of clients) for (const id of c.visible) listed.add(id);
-  for (const r of latestRows) if (listed.has(r.id)) meta.refreshStats(r.mint);
+  for (const r of latestRows) if (listed.has(r.id)) { meta.refreshStats(r.mint); meta.requestLinks(r.mint); }
+  refreshBundlePriority();
 }, 15000);
+// Coins people are looking at, open pools first, then by list rank: they go first in the bundle detector's
+// queues, and pump.fun ones the server didn't see launch are rebuilt from chain history (backfill).
+function refreshBundlePriority() {
+  const ids = [];
+  for (const c of clients) if (c.selected) ids.push(c.selected);
+  for (const c of clients) ids.push(...c.visible);
+  const rows = new Map(latestRows.map(r => [r.id, r]));
+  const ordered = [...new Set(ids)].map(id => rows.get(id)).filter(Boolean);
+  launchBundles.prioritize(ordered.map(r => r.mint));
+  backfill?.want([...new Set(ordered.filter(r => r.program === 'pump' || (r.program === 'pumpswap' && r.mint.endsWith('pump'))).map(r => r.mint))]);
+}
 // server stats change slowly and are bulky: their own message every 2s
 setInterval(() => { if (clients.size) broadcast({ type: 'stats', stats: stats() }); }, 2000);
 
@@ -460,6 +491,20 @@ const server = http.createServer(async (req, res) => {
       });
     }
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ mint, pools: out }));
+  } else if (url.pathname === '/api/bundle') {
+    // one launch's bundle report: wallets, roles, what they bought / sold / hold, and the bundles found
+    // (202 while a coin that launched before the server started is being rebuilt from chain history)
+    const mint = url.searchParams.get('mint') || '', report = launchBundles.report(mint), pending = !report && backfill?.status(mint);
+    res.writeHead(report ? 200 : pending ? 202 : 404, { 'content-type': 'application/json' })
+      .end(JSON.stringify(report || (pending ? { backfill: pending } : { error: 'launch not seen by this server' })));
+  } else if (url.pathname === '/api/bundles') {
+    // recent launches where wallets bought alongside the creator, newest first
+    const limit = Math.max(1, Math.min(500, +url.searchParams.get('limit') || 50)), min = +url.searchParams.get('min') || 0;
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), launches: launchBundles.recent({ limit, min }) }));
+  } else if (url.pathname === '/api/bundle-wallets') {
+    // this server's compiled wallet DB, most launches first
+    const limit = Math.max(1, Math.min(1000, +url.searchParams.get('limit') || 100));
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ stats: launchBundles.stats(), wallets: launchBundles.wallets({ limit }) }));
   } else if (url.pathname === '/api/health') {
     // per program: pools seen, resolved (mints + decimals known), priced (quote token has a USD price)
     const h = {};
@@ -498,6 +543,7 @@ wss.on('connection', ws => {
     } else if (m.type === 'select') {
       c.selected = typeof m.id === 'string' ? m.id : null;
       if (c.selected) send({ type: 'tape', id: c.selected, trades: market.tape(c.selected) });
+      refreshBundlePriority(); // an opened coin's launch goes to the front of the queues
     }
   });
   ws.on('close', () => clients.delete(c));

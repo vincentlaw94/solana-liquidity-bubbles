@@ -142,14 +142,17 @@ export function createImageProxy({ maxBytes = 10e6, cacheBytes = 64e6, ttlMs = 1
     return p;
   }
   // pump.fun-style metadata JSON ({ image: ... }) -> image URL, via the same gateways
-  async function metadataImage(uri) {
+  // A coin's metadata JSON: its image, and the links its creator set (X, website, Telegram). null if unreadable.
+  async function metadata(uri) {
     try {
       const r = await fetchFirst(candidates(uri), r => /json|text\/plain|octet-stream/.test(r.type) || r.body[0] === 0x7b, 64e3);
-      const raw = JSON.parse(r.body.toString('utf8')).image;
+      const j = JSON.parse(r.body.toString('utf8'));
+      const raw = j.image;
       const img = typeof raw === 'string' ? normalizeScheme(raw.trim()) : null;
-      return img && /^(https?|ipfs):\/\//.test(img) ? img : null;
+      return { image: img && /^(https?|ipfs):\/\//.test(img) ? img : null, links: creatorLinks(j) };
     } catch { return null; }
   }
+  const metadataImage = async uri => (await metadata(uri))?.image || null;
   async function handle(req, res, u) {
     stats.served++;
     let url = unwrapImageUrl(normalizeScheme(u.searchParams.get('u') || ''));
@@ -165,5 +168,20 @@ export function createImageProxy({ maxBytes = 10e6, cacheBytes = 64e6, ttlMs = 1
     });
     res.end(e.body);
   }
-  return { handle, metadataImage, stats };
+  return { handle, metadata, metadataImage, stats };
+}
+
+// Links from a coin's metadata (pump.fun puts them at the top level and under `extensions`). They're whatever the
+// creator typed, so only well-formed http(s) links are kept; a bare handle becomes an x.com / t.me link.
+export function creatorLinks(j) {
+  const pick = k => j?.[k] || j?.extensions?.[k];
+  const link = (v, kind) => {
+    if (typeof v !== 'string' || !(v = v.trim()) || v.length > 300) return null;
+    if (kind === 'x' && /^@?\w{1,15}$/.test(v)) v = 'https://x.com/' + v.replace('@', '');
+    else if (kind === 'tg' && /^@?\w{5,32}$/.test(v)) v = 'https://t.me/' + v.replace('@', '');
+    else if (!/^https?:\/\//i.test(v)) { if (!/^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(v)) return null; v = 'https://' + v; }
+    try { const u = new URL(v); return /^https?:$/.test(u.protocol) && u.hostname.includes('.') ? u.href : null; } catch { return null; }
+  };
+  const out = { x: link(pick('twitter'), 'x'), web: link(pick('website'), 'web'), tg: link(pick('telegram'), 'tg') };
+  return out.x || out.web || out.tg ? out : null;
 }
