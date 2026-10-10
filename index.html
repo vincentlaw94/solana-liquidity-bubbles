@@ -174,8 +174,8 @@ section { padding: 14px 16px; border-bottom: 1px solid var(--line); display: gri
 .ctl.check { cursor: pointer; }
 .tick-up { color: var(--buy); } .tick-down { color: var(--sell); }
 table.pools td, .kv dd { transition: color .5s; }
-.rf { display: inline-grid; place-items: center; color: var(--sell); cursor: help; flex: none; }
-.rf svg { width: 14px; height: 14px; }
+.rf, .hb { display: inline-grid; place-items: center; color: var(--sell); cursor: help; flex: none; }
+.rf svg, .hb svg { width: 14px; height: 14px; }
 .flags.bundler { border-color: var(--sell); background: rgba(255,100,112,.08); }
 .flags.bundler b { color: var(--sell); display: inline-flex; align-items: center; gap: 6px; }
 .flags.bundler b svg { width: 14px; height: 14px; }
@@ -1070,7 +1070,9 @@ const axiomHtml = n => n.mint ? '<a class="tl" href="' + esc(axiomUrl(n.mint)) +
 // a link click opens the link, not the row
 document.addEventListener('click', e => { if (e.target.closest('a.tl')) e.stopPropagation(); }, true);
 
-// ---------- red flag: bundler deployer, or a highly bundled launch ----------
+// ---------- warnings: bundler deployer (red flag), highly bundled launch (bundle icon) ----------
+// a package box: the launch was bought up in bundles
+const ICON_BUNDLE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.6 14 4.6v6.8L8 14.4 2 11.4V4.6z"/><path d="M2 4.6 8 7.6l6-3M8 7.6v6.8"/><path d="m5 3.1 6 3" /></svg>';
 const HIGH_BUNDLE = 20; // % of supply bought at launch by the creator and wallets bundled with it (same as the column's red)
 const highlyBundled = n => !!(n.bundle && !n.bundle.est && n.bundle.pct >= HIGH_BUNDLE);
 const highBundleText = n => 'Highly bundled: ' + pct1(n.bundle.pct) + ' of supply bought at launch by the creator and wallets bundled with it' +
@@ -1140,9 +1142,9 @@ const COLUMNS = {
   rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => { setT(td, String(ctx.rank(n) ?? '–')); } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
     init: td => {
-      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="warn-mark" hidden>⚠</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
+      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="hb" hidden>' + ICON_BUNDLE + '</span><span class="warn-mark" hidden>⚠</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
       td._lg = td.querySelector('.lg'); td._b = td.querySelector('b'); td._small = td.querySelector('small');
-      td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot'); td._links = td.querySelector('.links-slot'); td._ax = td.querySelector('.axiom-slot');
+      td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._hb = td.querySelector('.hb'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot'); td._links = td.querySelector('.links-slot'); td._ax = td.querySelector('.axiom-slot');
     },
     set: (td, n) => {
       const key = (n.icon || '') + '|' + n.sym + '|' + n.dex;
@@ -1154,10 +1156,15 @@ const COLUMNS = {
         td._flags = flags; td._wm.hidden = !n.flags.length;
         if (n.flags.length) { td._wm.title = flags; td._wm.setAttribute('aria-label', 'Red flags: ' + n.flags.join('; ')); }
       }
-      const rf = redFlagText(n);
+      const rf = n.bundler ? bundlerText(n) : '';
       if (td._rfText !== rf) {
         td._rfText = rf; td._rf.hidden = !rf;
         if (rf) { td._rf.title = rf; td._rf.setAttribute('aria-label', rf); }
+      }
+      const hb = highlyBundled(n) ? highBundleText(n) : '';
+      if (td._hbText !== hb) {
+        td._hbText = hb; td._hb.hidden = !hb;
+        if (hb) { td._hb.title = hb; td._hb.setAttribute('aria-label', hb); }
       }
       const mint = n.mint || '';
       if (td._mint !== mint) { td._mint = mint; td._ca.innerHTML = copyButtonHtml(n.mint, n.sym); td._hide.innerHTML = hideButtonHtml(n); td._ax.innerHTML = axiomHtml(n); }
@@ -1519,7 +1526,7 @@ function renderPool(refreshOnly) {
     (n.flags.length ? '<div class="flags"><b>⚠ Red flags</b><ul>' + n.flags.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>' : '') +
     (n.bundler ? '<div class="flags bundler"><b>' + ICON_RED_FLAG + 'Bundler deployer</b><span>' + esc(bundlerText(n)) + '. ' +
       '<a href="https://isitbundled.com/" target="_blank" rel="noopener">isitbundled.com ↗</a></span></div>' : '') +
-    (highlyBundled(n) ? '<div class="flags bundler"><b>' + ICON_RED_FLAG + 'Highly bundled</b><span>' + esc(highBundleText(n)) + '.</span></div>' : '') +
+    (highlyBundled(n) ? '<div class="flags bundler"><b>' + ICON_BUNDLE + 'Highly bundled</b><span>' + esc(highBundleText(n)) + '.</span></div>' : '') +
     (n.mint ? '<div class="ca"><span class="lbl">CA</span><code>' + esc(n.mint) + '</code>' + linksHtml(n) + axiomHtml(n) + copyButtonHtml(n.mint, n.sym) + '</div>' : '') +
     (n.deployer ? '<div class="ca"><span class="lbl">Dev</span><code>' + esc(n.deployer) + '</code>' + copyButtonHtml(n.deployer, 'deployer') + '</div>' : '') +
     '<dl class="kv">' +
