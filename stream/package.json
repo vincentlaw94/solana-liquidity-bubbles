@@ -5,13 +5,17 @@
   "type": "module",
   "description": "Self-hosted real-time stream of Solana launchpad trades decoded straight from chain logs.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --env-file-if-exists=.env server.js",
+    "test": "node --test \"test/*.test.mjs\""
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.9"
   },
   "dependencies": {
+    "@grpc/grpc-js": "1.13.6",
+    "@grpc/proto-loader": "0.8.1",
     "bs58": "6.0.0",
+    "laserstream-core-proto-js": "9.1.0",
     "ws": "8.18.0"
   }
 }

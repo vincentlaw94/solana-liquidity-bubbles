@@ -26,17 +26,15 @@ npm start
 
 Then open http://localhost:8787.
 
-By default the server uses Solana's free public RPC. For lower latency and full Meteora DBC coverage,
-point it at your own RPC provider:
-
-```bash
-RPC_HTTP="https://your-rpc.example.com/?api-key=KEY" RPC_WS="wss://your-rpc.example.com/?api-key=KEY" DBC_TX_PER_SEC=10 npm start
-```
+By default the server uses Solana's free public RPC. For lower latency, complete Meteora DBC coverage and
+trader wallets on every venue, use **Helius LaserStream** (gRPC): copy `stream/.env.example` to `stream/.env`
+and set `LASERSTREAM_API_KEY`. Any other RPC provider also works through `RPC_HTTP` / `RPC_WS`. See
+[stream/README.md](stream/README.md).
 
 ## How it works
 
 ```
-Solana RPC websocket ─ logsSubscribe ─► decode ─► market state ─► WebSocket ─► dashboard (index.html)
+LaserStream gRPC, or RPC websocket logs ─► decode ─► market state ─► WebSocket ─► dashboard (index.html)
 Solana RPC http ── account / transaction lookups ──┘
 Coinbase / Binance ── SOL/USD ──┘    Jupiter ── token names, logos, creation times ──┘
 ```
@@ -49,5 +47,6 @@ how to add another launchpad.
 
 - All state is in memory, so a restart resets the 1h/24h figures and the New pools history.
 - On the free public RPC, swaps arrive about 2 seconds after their block, and Meteora DBC swaps are
-  sampled rather than complete.
+  sampled rather than complete. LaserStream removes the sampling and should cut the delay; its real-world
+  latency hasn't been measured here yet (that needs a live key).
 - Coins that graduate from LaunchLab move to Raydium pools, which aren't tracked yet.

@@ -113,7 +113,19 @@ export function decodeLogEvent(program, b) {
   return null;
 }
 
-// Meteora DBC emits events as self-CPI inner instructions, so it needs the full transaction.
+// Meteora DBC emits events as self-CPI inner instructions (emit_cpi!), not in logs.
+// decodeDbcEvent takes one such event's bytes (after the 8-byte emit_cpi tag); it is shared by the
+// RPC path (decodeDbcTx on a fetched transaction) and the LaserStream path (inner instructions inline).
+export function decodeDbcEvent(b, signer = null) {
+  if (b.length < 187 || b.subarray(0, 8).toString('hex') !== D.swap2) return null;
+  const buy = b[72] === 1; // TradeDirection: 0 base->quote (sell), 1 quote->base (buy)
+  const input = u64(b, 91), output = u64(b, 115);
+  return {
+    kind: 'trade', program: 'dbc', pool: pk(b, 8), config: pk(b, 40), buy,
+    quoteRaw: buy ? input : output, baseRaw: buy ? output : input,
+    sqrtPrice: u128(b, 123), qRes: u64(b, 163), threshold: u64(b, 171), user: signer, ts: u64(b, 179),
+  };
+}
 export function decodeDbcTx(tx) {
   const out = [];
   const keys = [...tx.transaction.message.accountKeys, ...(tx.meta.loadedAddresses?.writable || []), ...(tx.meta.loadedAddresses?.readonly || [])];
@@ -122,15 +134,8 @@ export function decodeDbcTx(tx) {
       if (keys[ix.programIdIndex] !== PROGRAMS.dbc) continue;
       const raw = Buffer.from(bs58.decode(ix.data));
       if (raw.length < 16 || raw.subarray(0, 8).toString('hex') !== EVENT_IX_TAG) continue;
-      const b = raw.subarray(8);
-      if (b.subarray(0, 8).toString('hex') !== D.swap2 || b.length < 187) continue;
-      const buy = b[72] === 1; // TradeDirection: 0 base->quote (sell), 1 quote->base (buy)
-      const input = u64(b, 91), output = u64(b, 115);
-      out.push({
-        kind: 'trade', program: 'dbc', pool: pk(b, 8), config: pk(b, 40), buy,
-        quoteRaw: buy ? input : output, baseRaw: buy ? output : input,
-        sqrtPrice: u128(b, 123), qRes: u64(b, 163), threshold: u64(b, 171), user: keys[0] || null, ts: u64(b, 179),
-      });
+      const ev = decodeDbcEvent(raw.subarray(8), keys[0] || null);
+      if (ev) out.push(ev);
     }
   }
   return out;

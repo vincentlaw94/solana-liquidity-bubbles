@@ -1,17 +1,25 @@
 // Self-hosted Solana launchpad stream.
-//   chain logs (websocket) -> decode -> market state -> WebSocket fan-out to dashboards
-// Env: RPC_HTTP, RPC_WS (default: Solana public mainnet), PORT (8787), RPC_RPS (5), RPC_METHOD_RPS (2.5), DBC_TX_PER_SEC (2),
+//   chain feed (LaserStream gRPC, or RPC websocket logs) -> decode -> market state -> WebSocket fan-out to dashboards
+// Env: LASERSTREAM_API_KEY (or HELIUS_API_KEY) switches the live feed to Helius LaserStream gRPC;
+//      LASERSTREAM_ENDPOINT (default Newark), LASERSTREAM_COMMITMENT (PROCESSED | CONFIRMED)
+//      RPC_HTTP, RPC_WS (default: Helius RPC when a key is set, else Solana public mainnet), PORT (8787),
+//      RPC_RPS, RPC_METHOD_RPS, DBC_TX_PER_SEC (2, websocket mode only),
 //      PUMPSWAP_ALL=1 to show every PumpSwap pool (default: only tokens that graduated from a launchpad)
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx } from './lib/decode.js';
+import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent } from './lib/decode.js';
+import { createLaserStream } from './lib/laserstream.js';
 import { createRpc, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
 import { Market } from './lib/market.js';
 
-const RPC_HTTP = process.env.RPC_HTTP || 'https://api.mainnet-beta.solana.com';
+const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
+const LASER_ENDPOINT = process.env.LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com';
+const LASER_COMMITMENT = (process.env.LASERSTREAM_COMMITMENT || 'PROCESSED').toUpperCase();
+// with a Helius key, account lookups go to Helius RPC too (far higher limits than the public endpoint)
+const RPC_HTTP = process.env.RPC_HTTP || (LASER_KEY ? 'https://mainnet.helius-rpc.com/?api-key=' + LASER_KEY : 'https://api.mainnet-beta.solana.com');
 const RPC_WS = process.env.RPC_WS || RPC_HTTP.replace(/^http/, 'ws');
 const PORT = +process.env.PORT || 8787;
 const DBC_TX_PER_SEC = +process.env.DBC_TX_PER_SEC || 2;
@@ -22,7 +30,7 @@ const SUBSCRIBED = PROGRAMS;
 const DASHBOARD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.html');
 
 // Defaults fit the free public RPC; with a paid endpoint raise RPC_RPS / RPC_METHOD_RPS / DBC_TX_PER_SEC.
-const rpc = createRpc(RPC_HTTP, { rps: +process.env.RPC_RPS || 5, methodRps: +process.env.RPC_METHOD_RPS || 2.5 });
+const rpc = createRpc(RPC_HTTP, { rps: +process.env.RPC_RPS || (LASER_KEY ? 20 : 5), methodRps: +process.env.RPC_METHOD_RPS || (LASER_KEY ? 10 : 2.5) });
 const accounts = createAccountLoader(rpc);
 const meta = createTokenMeta();
 const prices = createPrices();
@@ -51,36 +59,61 @@ const rate = { last: { ...counters.decoded }, perSec: {}, at: Date.now() };
 const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
 const dbcQueue = [];
 
-const chain = createLogStream({
-  url: RPC_WS,
-  programs: SUBSCRIBED,
-  onStatus: s => console.log(new Date().toISOString(), 'chain', s),
-  onLogs(name, sig, logs, err, slot) {
-    bump(counters.notifications, name);
-    if (err) { bump(counters.failedTx, name); return; }
-    if (name === 'dbc') {
-      if (logs.some(l => l.startsWith('Program log: Instruction: Swap'))) {
-        dbcQueue.push({ sig, at: Date.now() }); counters.dbcQueued++;
-        if (dbcQueue.length > 60) { dbcQueue.shift(); counters.dbcDropped++; }
-      }
-      return;
-    }
-    const program = PROGRAMS[name];
-    for (const e of eventsFromLogs(logs)) {
-      if (e.program !== program) continue; // the same tx can arrive on several subscriptions
-      const ev = decodeLogEvent(program, e.data);
-      if (!ev) continue;
-      ev.sig = sig; ev.slot = slot;
-      bump(counters.decoded, ev.program + ':' + ev.kind);
-      market.onEvent(ev);
-    }
-  },
-});
+const OUR_PROGRAMS = new Set(Object.values(SUBSCRIBED));
+const emitEvent = (ev, sig, slot, signer) => {
+  ev.sig = sig; ev.slot = slot;
+  if (!ev.user && signer) ev.user = signer; // LaunchLab logs don't name the trader; the transaction signer does
+  bump(counters.decoded, ev.program + ':' + ev.kind);
+  market.onEvent(ev);
+};
+// Decode launchpad events from a transaction's logs. `only` limits it to one program (websocket mode,
+// where the same transaction can arrive on several program subscriptions).
+function ingestLogs(logs, sig, slot, signer, only) {
+  for (const e of eventsFromLogs(logs)) {
+    if (only ? e.program !== only : !OUR_PROGRAMS.has(e.program)) continue;
+    const ev = decodeLogEvent(e.program, e.data);
+    if (ev) emitEvent(ev, sig, slot, signer);
+  }
+}
+
+const chain = LASER_KEY
+  // LaserStream: whole transactions, failed ones filtered at the source, DBC events inline
+  ? createLaserStream({
+      endpoint: LASER_ENDPOINT, apiKey: LASER_KEY, programs: SUBSCRIBED, commitment: LASER_COMMITMENT,
+      onStatus: s => console.log(new Date().toISOString(), 'chain', s),
+      onTx(tx) {
+        bump(counters.notifications, 'laserstream');
+        ingestLogs(tx.logs, tx.sig, tx.slot, tx.signer);
+        for (const e of tx.cpiEvents) {
+          if (e.program !== PROGRAMS.dbc) continue;
+          const ev = decodeDbcEvent(e.data, tx.signer);
+          if (ev) emitEvent(ev, tx.sig, tx.slot, tx.signer);
+        }
+      },
+    })
+  // public/RPC websocket: program log subscriptions; DBC swaps need a follow-up getTransaction
+  : createLogStream({
+      url: RPC_WS,
+      programs: SUBSCRIBED,
+      onStatus: s => console.log(new Date().toISOString(), 'chain', s),
+      onLogs(name, sig, logs, err, slot) {
+        bump(counters.notifications, name);
+        if (err) { bump(counters.failedTx, name); return; }
+        if (name === 'dbc') {
+          if (logs.some(l => l.startsWith('Program log: Instruction: Swap'))) {
+            dbcQueue.push({ sig, at: Date.now() }); counters.dbcQueued++;
+            if (dbcQueue.length > 60) { dbcQueue.shift(); counters.dbcDropped++; }
+          }
+          return;
+        }
+        ingestLogs(logs, sig, slot, null, PROGRAMS[name]);
+      },
+    });
 
 // Meteora DBC events live in inner instructions, so swaps are fetched as full transactions (rate-capped).
 // Logs arrive at "processed"; a transaction is only fetchable once confirmed, so wait a few seconds.
 const DBC_CONFIRM_MS = 1500; // usually confirmed by then; a null result is retried
-setInterval(async () => {
+if (!LASER_KEY) setInterval(async () => {
   if (rpc.busy('getTransaction') > 1000) return; // backed off after 429s: don't pile up requests
   let i = dbcQueue.length - 1;
   while (i >= 0 && Date.now() - dbcQueue[i].at < DBC_CONFIRM_MS) i--;
@@ -91,7 +124,7 @@ setInterval(async () => {
     if (!tx) { if (Date.now() - at < 20000) dbcQueue.unshift({ sig, at: at + 1000 }); else counters.dbcMissing++; return; }
     if (tx.meta?.err) return;
     counters.dbcFetched++;
-    for (const ev of decodeDbcTx(tx)) { ev.sig = sig; ev.slot = tx.slot; bump(counters.decoded, 'dbc:trade'); market.onEvent(ev); }
+    for (const ev of decodeDbcTx(tx)) emitEvent(ev, sig, tx.slot, ev.user);
   } catch {}
 }, 1000 / DBC_TX_PER_SEC);
 
@@ -144,6 +177,8 @@ function stats() {
   const tps = Object.entries(rate.perSec).filter(([k]) => k.endsWith(':trade')).reduce((s, [, v]) => s + v, 0);
   return {
     uptime: Math.round((now - started) / 1000), connected: chain.connected, reconnects: chain.reconnects,
+    source: LASER_KEY ? { type: 'laserstream', endpoint: chain.endpoint, commitment: LASER_COMMITMENT, lastSlot: chain.lastSlot, transactions: chain.received }
+      : { type: 'rpc-websocket', endpoint: RPC_WS.replace(/api-key=[^&]+/, 'api-key=***') },
     tradesPerSec: +tps.toFixed(1), perProgram: rate.perSec, pools: market.pools.size, trades: market.counts.trades,
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
@@ -354,5 +389,6 @@ wss.on('connection', ws => {
 
 server.listen(PORT, () => {
   console.log(`Launchpad stream on http://localhost:${PORT}  (ws://localhost:${PORT}/ws)`);
+  console.log(`Live feed: ${LASER_KEY ? 'Helius LaserStream gRPC (' + new URL(LASER_ENDPOINT).host + ', ' + LASER_COMMITMENT + ')' : 'RPC websocket ' + RPC_WS.replace(/api-key=[^&]+/, 'api-key=***')}`);
   console.log(`RPC ${RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***')}`);
 });

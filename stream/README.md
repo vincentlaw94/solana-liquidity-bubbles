@@ -1,11 +1,13 @@
 # Solana launchpad stream
 
-A self-hosted, Bitquery-style real-time feed of Solana launchpad trading. It reads program logs straight
-from a Solana RPC websocket, decodes every swap itself, keeps live per-pool state, and pushes it to the
-bubble-map dashboard (`../index.html`) over a WebSocket. No third-party data API is involved for trades.
+A self-hosted, Bitquery-style real-time feed of Solana launchpad trading. It reads launchpad transactions
+straight from the chain (Helius LaserStream gRPC, or a Solana RPC websocket), decodes every swap itself, keeps
+live per-pool state, and pushes it to the dashboard (`../index.html`) over a WebSocket. No third-party data API
+is involved for trades.
 
 ```
-Solana RPC websocket ──logsSubscribe──► decode.js ──► market.js ──► server.js ──ws──► dashboard
+LaserStream gRPC (full txs) ─┐
+       or RPC websocket logs ┴──► decode.js ──► market.js ──► server.js ──ws──► dashboard
  (pump.fun, PumpSwap,                  (Anchor event   (pools, 5-min     (per-client
   LaunchLab, Meteora DBC)               layouts)        windows, tape)    top-N + trades)
 Solana RPC http ── getMultipleAccounts / getTransaction ─┘
@@ -19,7 +21,40 @@ npm install
 npm start
 ```
 
-Open http://localhost:8787. It needs Node 22 or newer, which ships a built-in WebSocket client.
+Open http://localhost:8787. It needs Node 22.9 or newer.
+
+### With Helius LaserStream (recommended)
+
+Copy `.env.example` to `.env` and set `LASERSTREAM_API_KEY` to your Helius API key (LaserStream mainnet needs
+a Helius plan that includes it). `npm start` reads `.env` automatically, and `.env` is git-ignored. The
+startup log then says `Live feed: Helius LaserStream gRPC (...)`.
+
+What changes compared with the public RPC websocket:
+
+- **Latency:** transactions are pushed from the node over gRPC instead of as websocket log notifications.
+- **Less data:** failed and vote transactions are filtered out at the source.
+- **Meteora DBC is complete:** its events arrive inside each transaction, so there's no follow-up
+  `getTransaction` and no sampling.
+- **Wallets everywhere:** the signer is known for every transaction, so trader counts and wash-trading checks
+  also cover LaunchLab (Stonk.fun, LetsBonk).
+- **Reconnects resume:** after a dropped stream the subscription resumes from the last slot seen, and replayed
+  transactions are de-duplicated.
+- **Faster lookups:** account lookups use Helius RPC with the same key, with higher default rate budgets.
+
+The client uses the pure-JavaScript `@grpc/grpc-js` with the protocol files Helius publishes
+(`laserstream-core-proto-js`). Helius's own SDK is a native module for macOS and Linux only; this works on
+Windows too.
+
+### Tests
+
+```bash
+npm test
+```
+
+This runs the LaserStream client against a local mock gRPC server. The mock serves real mainnet transactions
+from `test/fixtures` and checks authentication, the subscription filter, keepalive pings, that failed and vote
+transactions are dropped, resume-from-slot with de-duplication, and that the gRPC path decodes exactly what the
+RPC path decodes. `node test/record-fixtures.mjs` re-records the fixtures.
 
 ## Coverage
 
@@ -37,14 +72,17 @@ venue goes quiet, re-check its event layout first.
 
 | Env var | Default | Notes |
 |---|---|---|
-| `RPC_HTTP` | `https://api.mainnet-beta.solana.com` | Any Solana RPC endpoint |
-| `RPC_WS` | derived from `RPC_HTTP` | Websocket endpoint for `logsSubscribe` |
-| `RPC_RPS` | `5` | Overall request budget per second |
-| `RPC_METHOD_RPS` | `2.5` | Starting budget per RPC method; backs off on 429s |
-| `DBC_TX_PER_SEC` | `2` | Meteora DBC transactions fetched per second |
+| `LASERSTREAM_API_KEY` (or `HELIUS_API_KEY`) | none | Turns on the LaserStream gRPC feed |
+| `LASERSTREAM_ENDPOINT` | `https://laserstream-mainnet-ewr.helius-rpc.com` | Pick your closest region: `ewr`, `pitt`, `slc`, `lax`, `lon`, `ams`, `fra`, `tyo`, `sgp` |
+| `LASERSTREAM_COMMITMENT` | `PROCESSED` | `PROCESSED` is lowest latency; `CONFIRMED` is about 1s later but never shows a transaction that gets dropped |
+| `RPC_HTTP` | Helius RPC with a key, else `https://api.mainnet-beta.solana.com` | Account lookups (and the websocket feed without LaserStream) |
+| `RPC_WS` | derived from `RPC_HTTP` | Websocket endpoint for `logsSubscribe` (only used without LaserStream) |
+| `RPC_RPS` | `20` with a Helius key, else `5` | Overall request budget per second |
+| `RPC_METHOD_RPS` | `10` with a Helius key, else `2.5` | Starting budget per RPC method; backs off on 429s |
+| `DBC_TX_PER_SEC` | `2` | Meteora DBC transactions fetched per second (only used without LaserStream) |
 | `PORT` | `8787` | HTTP + WebSocket port |
 
-The free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
+Without LaserStream, the free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
 rate-limits the follow-up HTTP calls. In practice:
 
 - Pump.fun trades are complete. PumpSwap pools are looked up after their 10th trade, so a graduated token appears once it trades.
