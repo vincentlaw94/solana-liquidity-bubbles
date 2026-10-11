@@ -144,6 +144,19 @@ section { padding: 14px 16px; border-bottom: 1px solid var(--line); display: gri
 .feed .t { color: var(--faint); }
 .feed .k { font-size: 10px; font-weight: 500; letter-spacing: .06em; }
 .feed .k.new { color: var(--buy); } .feed .k.grad { color: var(--accent); }
+.feed .k.dd { color: var(--sell); } .feed .k.ath { color: var(--buy); }
+.note { margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.why { display: block; color: var(--muted); font-size: 11px; line-height: 1.3; white-space: normal; min-width: 150px; max-width: 190px; }
+.athw { display: grid; gap: 2px; font-size: 12px; font-variant-numeric: tabular-nums; max-height: 300px; overflow-y: auto; }
+.athw button { all: unset; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 52px 64px; gap: 8px; align-items: baseline; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.athw button:hover, .athw button:focus-visible { background: var(--raise); }
+.athw button[aria-current="true"] { background: var(--raise); box-shadow: inset 2px 0 0 var(--accent); }
+.athw .rk { color: var(--faint); }
+.athw .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.athw .num { text-align: right; }
+.athw .st { text-align: right; font-size: 11px; color: var(--muted); }
+.athw .st.dd { color: var(--sell); font-weight: 500; }
+.athw .out { opacity: .6; }
 .feed .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed .v { color: var(--muted); font-size: 11px; }
 .feed .fresh { animation: flashIn 1.6s ease-out; }
@@ -230,6 +243,11 @@ table.pools tbody tr:hover { background: var(--raise); }
 table.pools tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 table.pools tbody tr[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--accent); background: var(--raise); }
 .tok { display: flex; align-items: center; gap: 10px; min-width: 0; }
+table.pools tbody tr.pinned { box-shadow: inset 3px 0 0 var(--accent); }
+table.pools tbody tr.dead > td { opacity: 0.5; }
+table.pools tbody tr.dead > td:first-child, table.pools tbody tr.dead .tok .dead-badge, table.pools tbody tr.dead .tok .pin-slot { opacity: 1; }
+.dead-badge { font: 700 10px/1 var(--mono); letter-spacing: .06em; color: var(--sell); border: 1px solid currentColor; border-radius: 4px; padding: 2px 4px; cursor: help; }
+.copy.pin-on { color: var(--accent); }
 .tok b { font: 700 14px/1.1 var(--display); }
 .tok small { color: var(--faint); }
 .copy { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 5px; border: 1px solid transparent;
@@ -286,6 +304,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       <button type="button" data-v="trending" aria-pressed="true">Trending</button>
       <button type="button" data-v="top" aria-pressed="false">Top volume</button>
       <button type="button" data-v="both" aria-pressed="false" title="Trending and Top volume side by side">Both</button>
+      <button type="button" data-v="breakout" aria-pressed="false" title="Safer small caps whose trading looks like the setups before a 2x. A screen, not a prediction: see its record in the side panel">Breakout</button>
     </div>
     <label class="ctl" for="colorBy">Color
       <select id="colorBy">
@@ -366,6 +385,22 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       <div class="empty">Click a bubble to open the pool and stream its swaps.</div>
     </section>
 
+    <section id="breakoutSection" hidden>
+      <div class="label" title="Every coin that makes the Breakout list (Genuine only) is recorded at its market cap that moment, then followed for a day. Settled = flagged over 6h ago, so fresh flags don't count as misses.">Breakout record · last 24h</div>
+      <div class="stats">
+        <div class="stat"><b id="bFlagged">–</b><small>Coins flagged</small></div>
+        <div class="stat"><b id="bHits">–</b><small>Reached 2× after</small></div>
+        <div class="stat"><b id="bRate">–</b><small id="bRateLabel">Hit rate (settled)</small></div>
+        <div class="stat"><b id="bMedian">–</b><small>Median best since flagged</small></div>
+      </div>
+      <p class="note">A screen for setups, not a forecast. Most launchpad coins go to zero, and a high score is no promise of a 2×. Judge the list by this record, and never trade more than you can lose.</p>
+    </section>
+
+    <section id="athSection">
+      <div class="label" title="Every coin that reaches the top 10 of Top volume (Genuine only) is followed from then on, even after it drops out. Its high is the largest market cap this server has seen (hourly highs up to 24h back, then every swap). A fall of 80% from the high is marked; a new high clears it.">ATH watch · Top volume top 10</div>
+      <div class="athw" id="athWatch"><div class="empty">Coins appear here once they reach the top 10 of Top volume.</div></div>
+    </section>
+
     <section id="feedSection">
       <div class="label">Launches &amp; graduations</div>
       <div class="feed" id="feed"><div class="empty">New tokens and curve graduations appear here as they happen on-chain.</div></div>
@@ -385,6 +420,9 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       All data comes from your own server (stream/), which subscribes to Solana program logs and decodes every swap on Pump.fun (including graduated tokens on the Pump AMM),
       Raydium LaunchLab (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags and others). Each ripple is one real swap, sized by its USD value.
       Top volume ranks by 24h volume, Trending by recent momentum, and Both shows the two lists side by side.
+      Breakout ranks coins that pass safety checks (genuine trading, under 20% bundled, no bundler deployer, $3k+ liquidity,
+      $5k–$2M market cap, not dumping, not up over 5× this hour) by room to grow, buy pressure, volume pace, traders, pool depth and curve progress.
+      It is a screen, not a prediction; its record in the side panel shows how flagged coins actually did.
       "Genuine only" hides pools with red flags: liquidity pulled, wash or self-trading, active mint or freeze authority,
       a pool holding almost all supply, an implausible market cap, or dust liquidity.
       Liquidity is the USD value of the quote-side reserve. Volumes and price changes count from when the server started (up to 24h).
@@ -394,7 +432,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 
 <script>
 // Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
-const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Trending + Top volume' };
+const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Trending + Top volume', breakout: 'Breakout' };
 const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
 const DEX_PALETTE = ['#f3b33d', '#5aa9ff', '#c38bff', '#2ed3a3', '#ff8a5c', '#ff6fb1', '#9ee35b', '#4fd6e8'];
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -404,7 +442,7 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
-const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], size: 'log', view: 'list', panel: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
+const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], size: 'log', view: 'list', panel: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
                 lastUpdate: 0, error: null };
 let nodes = [];
 const byId = new Map();
@@ -473,6 +511,10 @@ function fromStream(r, i) {
     mint: r.mint,
     deployer: r.deployer || null,
     holders: r.holders ?? null,
+    ath: r.ath || null, athAt: r.athAt || null, ddAt: r.ddAt || null, // ATH watch (coins that reached the Top volume top 10)
+    why: r.why || [], // Breakout: why the coin scored
+    pin: r.pin || null, gone: !!r.gone, // pinned by the viewer: { at, entry, peak, peakAt, dead: [reasons] | null, deadAt }; gone: no pool left
+    flagMcap: r.flagMcap || null, flagAt: r.flagAt || null, peakX: r.peakX || null, hitAt: r.hitAt || null, // Breakout record
     links: r.links || null, // { x, web, tg } set by the coin's creator (unverified)
     bundler: r.deployerBundler ? { launches: r.bundlerLaunches, pnl: r.bundlerPnl } : null,
     // launch bundle found by the server (absent fields are zero; none at all: launch not seen, or nobody bought alongside)
@@ -537,6 +579,7 @@ function streamConnect() {
   ws.onopen = () => {
     stream.open = true; stream.retry = 0; state.error = null;
     streamConfig();
+    if (state.pins.length) streamSend({ type: 'pins', pins: state.pins }); // the server takes back any it lost
     if (state.selected) streamSend({ type: 'select', id: state.selected.id });
     renderStatus();
   };
@@ -559,6 +602,9 @@ function streamConnect() {
       if (state.selected?.id !== m.id) return;
       tradeRows = m.trades.map(t => tapeRow(t, false)); tradeFor = state.selected.addr; renderTape(true);
     } else if (m.type === 'event') pushFeed(m);
+    else if (m.type === 'ath') { athCoins = m.coins; renderAth(); }
+    else if (m.type === 'breakout') renderBreakout(m.stats);
+    else if (m.type === 'pins') mergePins(m.pins);
   };
   ws.onclose = () => {
     const wasOpen = stream.open;
@@ -615,9 +661,11 @@ function pushFeed(ev) {
   feed.unshift(ev);
   const b = document.createElement('button');
   b.type = 'button'; b.className = 'fresh'; b.dataset.pool = ev.pool;
-  const grad = ev.kind === 'graduate';
+  const [kc, kt] = { graduate: ['grad', 'GRAD'], drawdown: ['dd', '−80%'], athReset: ['ath', 'ATH'] }[ev.kind] || ['new', 'NEW'];
+  if (ev.kind === 'drawdown') b.title = ev.symbol + ' fell 80% from its ' + usd(ev.ath) + ' high (now ' + usd(ev.mcap) + ')';
+  else if (ev.kind === 'athReset') b.title = ev.symbol + ' made a new high of ' + usd(ev.ath) + ' after an 80% drawdown: watch reset';
   b.innerHTML = '<span class="t">' + new Date(ev.at).toLocaleTimeString([], { hour12: false }) + '</span>' +
-    '<span class="k ' + (grad ? 'grad' : 'new') + '">' + (grad ? 'GRAD' : 'NEW') + '</span>' +
+    '<span class="k ' + kc + '">' + kt + '</span>' +
     '<span class="nm">' + esc(ev.symbol || '?') + (ev.name ? ' <span class="v">' + esc(ev.name) + '</span>' : '') + '</span>' +
     '<span class="v">' + esc(prettyDex(ev.venue || '')) + '</span>';
   el.prepend(b);
@@ -630,7 +678,7 @@ $('feed').addEventListener('click', e => {
 });
 $('feed').addEventListener('mouseover', e => {
   const b = e.target.closest('button[data-pool]');
-  if (b) b.title = byId.has(b.dataset.pool) ? 'Open this pool' : 'Not on the map yet: it appears once it trades enough to rank';
+  if (b && !b.title) b.title = byId.has(b.dataset.pool) ? 'Open this pool' : 'Not on the map yet: it appears once it trades enough to rank';
 });
 
 // ---------- trades for the open pool ----------
@@ -638,7 +686,7 @@ let tradeRows = [], tradeFor = null;
 function select(n) {
   state.selected = n;
   tradeRows = []; tradeFor = null;
-  renderPool(); renderBoard();
+  renderPool(); renderBoard(); renderAth();
   streamSend({ type: 'select', id: n ? n.id : null });
 }
 
@@ -1111,6 +1159,50 @@ document.addEventListener('click', e => {
 }, true);
 $('hiddenBtn').addEventListener('click', () => setHidden([]));
 
+// ---------- pinned coins ----------
+// Pins live on the server (stream/lib/pins.js), so they're followed with the browser closed and come back at the
+// top of the Breakout list until unpinned; other lists don't show them. The button flips straight away; the next
+// list update confirms it.
+const pinsShown = () => state.list === 'breakout';
+const pinOf = n => pinsShown() ? n.pin : null;
+const ICON_PIN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5l4 4-2 1-2.5 2.5-.5 3-6-6 3-.5L8 4z"/><path d="M5.5 10.5L2.5 13.5"/></svg>';
+const ICON_PIN_ON = ICON_PIN.replace('fill="none"', 'fill="currentColor"');
+function pinButtonHtml(n) {
+  if (!n.mint || !pinsShown()) return '';
+  const on = !!n.pin, label = (on ? 'Unpin ' : 'Pin ') + (n.sym || 'coin');
+  return '<button type="button" class="copy' + (on ? ' pin-on' : '') + '" data-pin="' + esc(n.mint) + '" data-id="' + esc(n.id) + '" title="' +
+    (on ? 'Unpin this coin' : 'Pin to the top and keep tracking it') + '" aria-label="' + esc(label) + '" aria-pressed="' + on + '">' + (on ? ICON_PIN_ON : ICON_PIN) + '</button>';
+}
+// This browser's copy of the pins (saved with the other settings): the server's list, plus any it doesn't have,
+// which are sent back to it. Unpinning removes a coin from both.
+const validMint = m => typeof m === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(m);
+const num = v => typeof v === 'number' && isFinite(v) && v > 0 ? v : null;
+const cleanPin = p => p && validMint(p.mint) && num(p.entry) && num(p.at) ?
+  { mint: p.mint, sym: String(p.sym || '').slice(0, 40), at: p.at, entry: p.entry, peak: num(p.peak) || p.entry, peakAt: num(p.peakAt) || p.at } : null;
+function mergePins(serverPins) {
+  const fromServer = (serverPins || []).map(cleanPin).filter(Boolean), have = new Set(fromServer.map(p => p.mint));
+  const missing = state.pins.filter(p => !have.has(p.mint));
+  if (missing.length) streamSend({ type: 'pins', pins: missing });
+  const next = fromServer.concat(missing);
+  if (JSON.stringify(next) !== JSON.stringify(state.pins)) { state.pins = next; saveSettings(); }
+}
+const deadText = n => pinOf(n)?.dead ? 'Looks dead since ' + ago(n.pin.deadAt) + ' ago:\n' + n.pin.dead.join('\n') : '';
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-pin]');
+  if (!b) return;
+  e.stopPropagation(); // don't also open the row
+  const mint = b.dataset.pin, on = nodes.some(n => n.mint === mint && n.pin);
+  streamSend({ type: on ? 'unpin' : 'pin', mint, id: b.dataset.id });
+  const coin = nodes.find(n => n.mint === mint), now = Date.now();
+  state.pins = state.pins.filter(p => p.mint !== mint);
+  if (!on && coin && mcapOf(coin) > 0) state.pins.push({ mint, sym: coin.sym, at: now, entry: mcapOf(coin), peak: mcapOf(coin), peakAt: now });
+  saveSettings();
+  for (const n of nodes) if (n.mint === mint) {
+    n.pin = on ? null : { at: now, entry: mcapOf(n), peak: mcapOf(n), dead: null }; n._v++;
+  }
+  rebuildList(); renderPanels();
+}, true);
+
 // logos that failed in the list or panel get another try every minute
 setInterval(() => {
   for (const img of document.querySelectorAll('img.logo[hidden]')) {
@@ -1125,6 +1217,7 @@ setInterval(() => {
 // Every column the list can show. `init` builds a cell once and `set` refreshes it in place,
 // so rows (and their logo images) survive the 4x/second refresh.
 const mcapOf = n => n.mcap || NaN;
+const athDrop = (mcap, ath) => Math.min(0, (mcap / ath - 1) * 100); // % below the high
 const barCell = color => '<div class="cellbar"><span></span><div class="mini"><div' + (color ? ' style="background:' + color + '"' : '') + '></div></div></div>';
 // show a value and tint it green/red for a moment when it moves
 function tickCell(td, v, text) {
@@ -1142,9 +1235,10 @@ const COLUMNS = {
   rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => { setT(td, String(ctx.rank(n) ?? '–')); } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
     init: td => {
-      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="hb" hidden>' + ICON_BUNDLE + '</span><span class="warn-mark" hidden>⚠</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="hide-slot"></span></div>';
+      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="hb" hidden>' + ICON_BUNDLE + '</span><span class="warn-mark" hidden>⚠</span><span class="dead-badge" hidden>DEAD</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="pin-slot"></span><span class="hide-slot"></span></div>';
       td._lg = td.querySelector('.lg'); td._b = td.querySelector('b'); td._small = td.querySelector('small');
       td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._hb = td.querySelector('.hb'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot'); td._links = td.querySelector('.links-slot'); td._ax = td.querySelector('.axiom-slot');
+      td._pin = td.querySelector('.pin-slot'); td._dead = td.querySelector('.dead-badge');
     },
     set: (td, n) => {
       const key = (n.icon || '') + '|' + n.sym + '|' + n.dex;
@@ -1168,6 +1262,10 @@ const COLUMNS = {
       }
       const mint = n.mint || '';
       if (td._mint !== mint) { td._mint = mint; td._ca.innerHTML = copyButtonHtml(n.mint, n.sym); td._hide.innerHTML = hideButtonHtml(n); td._ax.innerHTML = axiomHtml(n); }
+      const pk = n.mint ? (n.pin ? 'on' : 'off') + n.id : '';
+      if (td._pk !== pk) { td._pk = pk; td._pin.innerHTML = pinButtonHtml(n); }
+      const dt = deadText(n);
+      if (td._dt !== dt) { td._dt = dt; td._dead.hidden = !dt; td._dead.title = dt; if (dt) td._dead.setAttribute('aria-label', dt); }
       const lk = n.links ? [n.links.x, n.links.web, n.links.tg].join('|') : '';
       if (td._lk !== lk) { td._lk = lk; td._links.innerHTML = linksHtml(n); }
     } },
@@ -1189,6 +1287,29 @@ const COLUMNS = {
   vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { setT(td, usd(n.vol24)); } },
   traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { setT(td, n.traders5 ? String(n.traders5) : '–'); } },
   score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { setT(td, n.score != null ? n.score.toFixed(1) : '–'); } },
+  // Breakout list: setup score (0-100) and the reasons behind it
+  setup: { label: 'Setup', align: 'l', sort: n => state.list === 'breakout' ? n.score ?? -Infinity : -Infinity,
+    init: td => { td.innerHTML = '<b></b><span class="why"></span>'; td._b = td.firstChild; td._why = td.lastChild; },
+    set: (td, n) => {
+      const on = state.list === 'breakout' && n.score != null;
+      setT(td._b, on ? String(Math.round(n.score)) : '–'); setT(td._why, on ? n.why.join(' · ') : '');
+    } },
+  // pinned coins: market cap now against when pinned, and its best since
+  sincePin: { label: 'Since pinned', sort: n => pinOf(n) ? mcapOf(n) / n.pin.entry : -Infinity,
+    set: (td, n) => {
+      const p = pinOf(n), x = p ? mcapOf(n) / p.entry : NaN;
+      setT(td, p ? x.toFixed(2) + '×' : ''); setC(td, !p ? '' : p.dead ? 'down' : x >= 1 ? 'up' : 'down');
+      const t = p ? 'Pinned ' + ago(p.at) + ' ago at ' + usd(p.entry) + '; best since ' + (p.peak / p.entry).toFixed(2) + '× (' + usd(p.peak) + ')' : '';
+      if (td.title !== t) td.title = t;
+    } },
+  // Breakout record: market cap now against when the list first flagged the coin, and its best since
+  sinceFlag: { label: 'Since flagged', sort: n => n.flagMcap ? mcapOf(n) / n.flagMcap : -Infinity,
+    set: (td, n) => {
+      const x = n.flagMcap ? mcapOf(n) / n.flagMcap : NaN;
+      setT(td, n.flagMcap ? x.toFixed(2) + '×' : '–'); setC(td, !n.flagMcap ? '' : n.hitAt ? 'up' : x < 1 ? 'down' : '');
+      const t = n.flagMcap ? 'Flagged ' + ago(n.flagAt) + ' ago at ' + usd(n.flagMcap) + '; best since ' + (n.peakX || 1).toFixed(2) + '×' + (n.hitAt ? ', reached 2× ' + ago(n.hitAt) + ' ago' : '') : 'Not flagged by the Breakout list in the last day';
+      if (td.title !== t) td.title = t;
+    } },
   tx: { label: 'Buys / sells 5m', sort: n => n.buys5 + n.sells5,
     init: td => {
       td.innerHTML = '<div class="cellbar"><span><span class="up"></span> / <span class="down"></span></span><div class="mini split"><div></div></div></div>';
@@ -1212,6 +1333,19 @@ const COLUMNS = {
       const b = n.bundle;
       setT(td, b ? bundleLabel(b) : '–'); setC(td, b && b.pct >= 20 ? 'down' : '');
       const t = b ? bundleTitle(b) : 'No launch bundle seen (or this server didn’t see the launch)';
+      if (td.title !== t) td.title = t;
+    } },
+  ath: { label: 'ATH', sort: n => n.ath ?? -Infinity,
+    set: (td, n) => {
+      setT(td, n.ath ? usd(n.ath) : '–');
+      const t = n.ath ? 'Highest market cap seen, ' + ago(n.athAt) + ' ago' : 'Not followed: only coins that reached the Top volume top 10 are';
+      if (td.title !== t) td.title = t;
+    } },
+  fromAth: { label: 'From ATH', sort: n => n.ath ? athDrop(n.mcap, n.ath) : -Infinity,
+    set: (td, n) => {
+      const v = n.ath ? athDrop(n.mcap, n.ath) : NaN;
+      setT(td, n.ath ? (v > -0.05 ? 'ATH' : pct(v)) : '–'); setC(td, n.ddAt ? 'down' : '');
+      const t = n.ddAt ? 'Down 80% from its ' + usd(n.ath) + ' high since ' + ago(n.ddAt) + ' ago; a new high resets it' : n.ath ? 'From its ' + usd(n.ath) + ' high' : '';
       if (td.title !== t) td.title = t;
     } },
   coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
@@ -1239,7 +1373,16 @@ function normalizeColumns(saved) {
   return out;
 }
 state.columns = normalizeColumns(null);
-const shownColumns = () => state.columns.filter(c => c.on).map(c => c.key);
+// the Breakout list always shows its own columns, right after the token
+const BREAKOUT_COLUMNS = ['setup', 'sinceFlag'];
+// and "Since pinned" while any coin is pinned
+const shownColumns = () => {
+  const cols = state.columns.filter(c => c.on).map(c => c.key);
+  const extra = state.list === 'breakout' ? BREAKOUT_COLUMNS.filter(k => !cols.includes(k)) : [];
+  if (pinsShown() && !cols.includes('sincePin') && nodes.some(n => n.pin)) extra.unshift('sincePin');
+  cols.splice(cols.indexOf('token') + 1, 0, ...extra);
+  return cols;
+};
 
 // One table per list. With "Both", pane A shows the Trending coins and pane B the Top volume coins,
 // each ranked by its own list; otherwise pane A shows the whole list and pane B is hidden.
@@ -1296,11 +1439,16 @@ function updateRow(tr, n, cols, ctx) {
   for (let i = 0; i < cols.length; i++) COLUMNS[cols[i]].set(tr.children[i], n, ctx);
   if (tr._sel !== sel) { tr._sel = sel; tr.setAttribute('aria-selected', sel ? 'true' : 'false'); }
   if (tr._tint !== tint) { tr._tint = tint; tr.style.backgroundColor = tint; }
+  const pc = pinOf(n) ? (n.pin.dead ? 'pinned dead' : 'pinned') : '';
+  if (tr._pc !== pc) { tr._pc = pc; tr.className = pc; }
   tr._v = n._v; tr._at = ctx.now; tr._maxLiq = ctx.maxLiq;
 }
+let colsKey = '';
 function renderList() {
   if (state.view !== 'list') return;
   const cols = shownColumns(), now = performance.now();
+  // the column set changes on its own too (the first pin adds "Since pinned"): rebuild the rows when it does
+  if (cols.join() !== colsKey) { colsKey = cols.join(); for (const p of panes) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); } renderHead(); }
   for (const p of panes) if (!p.el.hidden) renderPane(p, cols, now);
 }
 function renderPane(p, cols, now) {
@@ -1308,7 +1456,9 @@ function renderPane(p, cols, now) {
   // decorate-sort: one sort value per row instead of two per comparison
   const keyed = [];
   for (const n of nodes) if (p.include(n) && visible(n) && matches(n)) keyed.push([sortValue(n, key, p), n]);
-  keyed.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) * dir || b[1].liq - a[1].liq);
+  const pinOrder = n => pinOf(n) ? (n.pin.dead ? 1 : 0) : 2;
+  keyed.sort((a, b) => pinOrder(a[1]) - pinOrder(b[1]) || (pinOf(a[1]) && pinOf(b[1]) ? a[1].pin.at - b[1].pin.at : 0) ||
+    (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0) * dir || b[1].liq - a[1].liq);
   const list = keyed.map(k => k[1]);
   let maxLiq = 1;
   for (const n of list) if (n.liq > maxLiq) maxLiq = n.liq;
@@ -1405,7 +1555,7 @@ function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       view: state.view, list: state.list, panel: state.panel, colorBy: state.colorBy, size: state.size,
-      group: state.group, genuine: state.genuine, hidden: state.hidden, sort: state.sort, columns: state.columns,
+      group: state.group, genuine: state.genuine, hidden: state.hidden, pins: state.pins, sort: state.sort, columns: state.columns,
     }));
   } catch {}
 }
@@ -1425,9 +1575,50 @@ function restoreSettings() {
       .map(h => ({ mint: h.mint, sym: String(h.sym || '').slice(0, 40) })).slice(-500);
     hiddenMints = new Set(state.hidden.map(h => h.mint));
   }
+  if (Array.isArray(s.pins)) state.pins = s.pins.map(cleanPin).filter(Boolean).slice(0, 200);
   if (s.sort && COLUMNS[s.sort.key] && (s.sort.dir === 1 || s.sort.dir === -1)) state.sort = { key: s.sort.key, dir: s.sort.dir };
   state.columns = normalizeColumns(s.columns);
 }
+
+// ---------- Breakout record ----------
+// the Breakout list's record, sent by the server every 2s
+function renderBreakout(b) {
+  if (!b) return;
+  setT($('bFlagged'), String(b.flagged));
+  setT($('bHits'), String(b.hits));
+  setT($('bRate'), b.hitRate == null ? '–' : Math.round(b.hitRate * 100) + '%');
+  setT($('bRateLabel'), b.settled ? 'Hit rate (' + b.settledHits + ' of ' + b.settled + ' settled)' : 'Hit rate (none settled yet)');
+  setT($('bMedian'), b.medianPeakX == null ? '–' : b.medianPeakX.toFixed(2) + '×');
+}
+// ---------- ATH watch ----------
+// Coins that reached the Top volume top 10, sent by the server every 2s: its current top 10 first, then the rest.
+let athCoins = [];
+function renderAth() {
+  const el = $('athWatch');
+  if (!athCoins.length) { setH(el, '<div class="empty">Coins appear here once they reach the top 10 of Top volume.</div>'); return; }
+  const sel = state.selected?.mint;
+  setH(el, athCoins.map(c => {
+    const drop = athDrop(c.mcap, c.ath);
+    const st = c.ddAt ? '−80% · ' + ago(c.ddAt) : c.mcap >= c.ath ? 'at ATH' : 'ATH ' + ago(c.athAt);
+    const tip = c.sym + ': ' + usd(c.mcap) + ' now, high ' + usd(c.ath) + ' (' + new Date(c.athAt).toLocaleString() + ')' +
+      (c.ddAt ? '\nFell 80% from it ' + ago(c.ddAt) + ' ago, lowest since ' + usd(c.ddLow) + '. A new high resets the watch.' : '') +
+      '\nIn the top 10 ' + (c.rank ? 'now, at #' + c.rank : 'until ' + ago(c.topAt) + ' ago') + ' · best #' + c.bestRank +
+      (c.drawdowns ? ' · 80% drawdowns: ' + c.drawdowns + ', recovered to a new high: ' + c.resets : '');
+    return '<button type="button" data-pool="' + esc(c.pool) + '" data-mint="' + esc(c.mint) + '" title="' + esc(tip) + '"' +
+      (c.rank ? '' : ' class="out"') + ' aria-current="' + (sel === c.mint) + '">' +
+      '<span class="rk">' + (c.rank || '·') + '</span><span class="nm">' + esc(c.sym) + '</span>' +
+      '<span class="num">' + usd(c.mcap) + '</span>' +
+      '<span class="num ' + (c.ddAt ? 'down' : '') + '">' + (drop > -0.05 ? '0%' : pct(drop)) + '</span>' +
+      '<span class="st' + (c.ddAt ? ' dd' : '') + '">' + st + '</span></button>';
+  }).join(''));
+}
+setInterval(renderAth, 5000); // the "ago" labels
+$('athWatch').addEventListener('click', e => {
+  const b = e.target.closest('button[data-mint]'); if (!b) return;
+  const n = byId.get(b.dataset.pool) || nodes.find(x => x.mint === b.dataset.mint && !x.dying);
+  if (n) select(n);
+  else b.title = 'Not on the current list: switch to Top volume or untick Genuine only to open it';
+});
 
 // ---------- side panels ----------
 // Which providers the server is using: live feed and account lookups, with details on hover.
@@ -1533,6 +1724,7 @@ function renderPool(refreshOnly) {
     '<dt>Price</dt><dd id="pvPrice">' + price(n.price) + '</dd>' +
     '<dt>Liquidity</dt><dd id="pvLiq">' + usdFine(n.liq) + '</dd>' +
     '<dt>Market cap</dt><dd id="pvMcap">' + usdFine(n.mcap || NaN) + '</dd>' +
+    '<dt>ATH</dt><dd data-f="ath">' + athText(n) + '</dd>' +
     '<dt>Holders</dt><dd data-f="holders">' + (n.holders != null ? n.holders.toLocaleString() : '–') + '</dd>' +
     '<dt>24h volume</dt><dd data-f="vol24">' + usd(n.vol24) + '</dd>' +
     '<dt>1h volume</dt><dd data-f="vol1">' + usd(n.vol1) + '</dd>' +
@@ -1556,6 +1748,12 @@ function renderPool(refreshOnly) {
 }
 const progressText = n => n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation';
 // in-place refresh of every number in the open pool panel
+// the ATH watch's view of a coin (only coins that reached the Top volume top 10 are followed)
+function athText(n) {
+  if (!n.ath) return 'not followed';
+  const d = athDrop(n.mcap, n.ath);
+  return usd(n.ath) + (d > -0.05 ? ' (at it)' : ' (' + pct(d) + ')') + (n.ddAt ? ' · −80% ' + ago(n.ddAt) + ' ago' : '');
+}
 function refreshPool(n) {
   const el = $('poolPanel');
   if (!el._f) el._f = {};
@@ -1564,6 +1762,7 @@ function refreshPool(n) {
   const put = (k, t) => { const e = f(k); if (e) setT(e, t); };
   put('vol24', usd(n.vol24)); put('vol1', usd(n.vol1)); put('vol5', usd(n.vol5));
   put('holders', n.holders != null ? n.holders.toLocaleString() : '–');
+  put('ath', athText(n)); { const e = f('ath'); if (e) setC(e, n.ddAt ? 'down' : ''); }
   put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
   if (n.progress != null) { put('progressText', progressText(n)); const b = f('progressBar'); if (b) setS(b, 'width', (n.progress * 100).toFixed(1) + '%'); }
   for (const k of ['m5', 'h1', 'h24']) { const e = f('chg_' + k); if (e) { setT(e, pct(n.chg[k])); setC(e, cls(n.chg[k])); } }
@@ -1601,13 +1800,14 @@ function segment(id, fn) {
 }
 function applyListUi() {
   $('boardLabel').textContent = 'Largest pools on the map';
+  $('breakoutSection').hidden = state.list !== 'breakout';
   renderLegend();
 }
 segment('srcSeg', v => {
   if (v === state.list) return;
   state.list = v; select(null);
   streamConfig(); // the server answers with the new list right away
-  setupPanes(); applyListUi(); renderPanels(); renderList();
+  setupPanes(); applyListUi(); renderPanels(); rebuildList(); // Breakout adds its own columns
 });
 // the right-hand panel (stats, open pool, launches) can be hidden to give the list the full width
 function setPanel(on) {

@@ -211,8 +211,9 @@ export class Market {
     bucket.q += quote; p.vol60 += quote;
     const hour = Math.floor(ev.at / 3600e3);
     let hb = p.hours[p.hours.length - 1];
-    if (!hb || hb.h !== hour) p.hours.push(hb = { h: hour, open: p.price, q: 0 });
+    if (!hb || hb.h !== hour) p.hours.push(hb = { h: hour, open: p.price, q: 0, hi: 0, hiAt: ev.at });
     hb.q += quote; p.vol24 += quote;
+    if (p.price > hb.hi) { hb.hi = p.price; hb.hiAt = ev.at; } // the hour's high, for the ATH watch (lib/ath.js)
     p.lastTs = ev.at;
     this.counts.trades++;
     if (replay) return;
@@ -331,6 +332,20 @@ export class Market {
       if (top && top.nb && top.ns && vol5 > 0 && top.q / vol5 > GENUINE.selfTradeShare) f.push('Self-trading: one wallet bought and sold ' + Math.round(100 * top.q / vol5) + '% of 5m volume');
     }
     return f;
+  }
+
+  // Highest market cap a coin reached in the hourly buckets of any of its pools (up to 24h back), and when.
+  // Valued at today's quote price; flipped pools are skipped (their token's high is the pool price's low).
+  high(mint) {
+    let best = null;
+    for (const p of this.pools.values()) {
+      if (!p.ready || p.mint !== mint || (MAJORS.has(p.mint) && !MAJORS.has(p.quoteMint))) continue;
+      for (const b of p.hours) {
+        const mcap = this.value(p, b.hi || b.open, 0).mcap;
+        if (mcap > (best?.mcap || 0)) best = { mcap, at: b.hiAt || b.h * 3600e3 };
+      }
+    }
+    return best;
   }
 
   tape(id) {
