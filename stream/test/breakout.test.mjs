@@ -53,6 +53,27 @@ test('the tracker records the flag price, the peak, and the first 2x', () => {
   assert.equal(t.get('A').entry, 40_000);
 });
 
+test('a coin flagged on its curve is followed to its AMM pool after graduation', () => {
+  const t = createBreakoutTracker();
+  const curve = row();
+  t.rank([{ ...curve, score: 70 }], [curve], 1000);
+  // both pools exist for a moment: the flagged one stays in charge
+  const amm = row({ id: 'amm:A', liq: 90_000, mcap: 41_000 });
+  t.rank([], [curve, amm], 2000);
+  assert.equal(t.get('A').pool, 'pump:A');
+  // the completed curve drops out of the rows; the AMM pool takes over and its swaps count
+  t.rank([], [{ ...amm, mcap: 60_000 }], 3000);
+  assert.equal(t.get('A').pool, 'amm:A');
+  t.trade({ p: 'amm:A', t: 4000, mc: 85_000 });
+  const c = t.get('A');
+  assert.equal(c.entry, 40_000);
+  assert.equal(c.peak, 85_000);
+  assert.equal(c.hitAt, 4000);
+  assert.equal(t.stats(4000).hits, 1);
+  t.trade({ p: 'pump:A', t: 5000, mc: 200_000 }); // a stray late print on the old curve is ignored
+  assert.equal(t.get('A').peak, 85_000);
+});
+
 test('stats count only coins flagged 6h+ ago toward the hit rate', () => {
   const t = createBreakoutTracker();
   const a = row(), b = row({ id: 'pump:B', mint: 'B' });

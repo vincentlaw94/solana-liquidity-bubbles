@@ -335,7 +335,7 @@ volume pace against the coin's own hour 20%, traders 15%, pool depth (liquidity 
 and is cut by 30% for coins already up over 150% in the hour. `why` lists the parts that stood out.
 
 **Record:** every coin that makes the list (as a fresh dashboard shows it) is kept for a day with its market cap when
-first flagged, its peak since (every swap counts) and `hitAt`, when it first reached 2×. The hit rate counts only coins
+first flagged, its peak since (every swap counts, followed from its curve to its AMM pool after graduation) and `hitAt`, when it first reached 2×. The hit rate counts only coins
 flagged over 6 hours ago, so fresh flags aren't counted as misses.
 
 ## Pins

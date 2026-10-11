@@ -74,7 +74,8 @@ export function rankBreakout(eligible, limit, now = Date.now()) {
 }
 
 // Follows every coin that makes the list: its market cap when first listed, its peak since, and when (if) it
-// reached 2x. Coins are forgotten a day after they were flagged.
+// reached 2x. Coins are followed by mint, from their curve to their AMM pool after graduation, and forgotten a
+// day after they were flagged.
 export function createBreakoutTracker({ target = 2, keepMs = 24 * 3600e3, max = 1000 } = {}) {
   const coins = new Map();  // mint -> entry
   const byPool = new Map(); // pool id -> mint
@@ -101,9 +102,20 @@ export function createBreakoutTracker({ target = 2, keepMs = 24 * 3600e3, max = 
         c.listed = true; c.pool = r.id; c.sym = r.sym;
         byPool.set(r.id, r.mint);
       }
+      // each coin's value from the pool it was flagged on, or once that's gone (a completed curve), its most liquid
+      // one: a graduated coin's AMM pool takes over, so a run after graduation counts toward its peak and 2x
+      const best = new Map();
       for (const r of rows) {
         const c = coins.get(r.mint);
-        if (c && r.id === c.pool) update(c, r.mcap, now);
+        if (!c) continue;
+        const b = best.get(r.mint);
+        if (!b || r.id === c.pool || (b.id !== c.pool && r.liq > b.liq)) best.set(r.mint, r);
+      }
+      for (const [mint, r] of best) {
+        const c = coins.get(mint);
+        if (r.id !== c.pool) c.pool = r.id;
+        byPool.set(r.id, mint);
+        update(c, r.mcap, now);
       }
       this.prune(now);
     },
