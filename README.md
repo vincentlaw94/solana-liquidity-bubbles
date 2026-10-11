@@ -20,6 +20,16 @@ chain logs. There's no third-party market-data API in between.
   history. Caught wallets are compiled into the server's own bundler-wallet DB.
 - **Links**: each coin shows the X, website and Telegram links its creator set (unverified), an Axiom button,
   and a red flag when its launch was 20% bundled or more.
+- **ATH watch**: every coin that reaches the top 10 of Top volume is followed, even after it drops out, with its
+  all-time-high market cap. A fall of 80% from the high is flagged in the side panel and the launches feed; a new
+  high resets it.
+- **Breakout list**: coins that pass safety checks (genuine trading, low launch bundling, no bundler deployer,
+  real liquidity, $5k–$2M market cap) ranked by a setup score: room to grow, buy pressure, volume pace, traders,
+  pool depth and curve progress. It's a screen, not a prediction: the side panel keeps its record, how many
+  flagged coins went on to 2× within a day.
+- **Pins**: pin coins on the Breakout list to keep them at its top, even after they drop off. Each shows its market
+  cap against when you pinned it, and a DEAD badge once it's rugged, down 80% from its peak, or stopped trading.
+  The server follows pins with the browser closed, and your browser keeps a copy that restores them.
 - **Your settings**: hide coins, copy contract addresses, choose and reorder columns. All of it is saved
   in your browser.
 

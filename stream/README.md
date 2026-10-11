@@ -122,11 +122,13 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
-- `GET /api/pools?list=trending|top|both&limit=100&minLiq=0&genuine=true`: a ranked pool list
+- `GET /api/pools?list=trending|top|both|breakout&limit=100&minLiq=0&genuine=true`: a ranked pool list
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
   - `both`: the union of the two (up to `limit` each); every row carries `rankT` and/or `rankV`, its place in
     Trending and in Top volume
+  - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` and `why`,
+    and pinned coins are added to it
 - `GET /api/bundle?mint=<mint>`: a launch's bundle report: status, shares of supply, every launch-window wallet with
   its role, what it bought, sold and still holds, its funding, the groups funded together, and the bundles found.
   202 with `backfill` progress while a coin that launched before the server started is being rebuilt; 404 if the
@@ -134,22 +136,30 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/bundles?limit=50&min=0`: recent launches where wallets bought alongside the creator, newest first
   (`min`: smallest bundled %)
 - `GET /api/bundle-wallets?limit=100`: this server's compiled bundler-wallet DB, most launches first
+- `GET /api/ath`: the ATH watch (see below): every coin that reached the Top volume top 10, its current top-10 coins first
+- `GET /api/breakout`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX) and every coin
+  flagged in the last day with its market cap then (`entry`), `peak` and `hitAt`
+- `GET /api/pins`: pinned coins with their entry, peak, current market cap and `dead` reasons
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a
     pool's static fields (names, logo, addresses), sent once and again only if they change; `d` carries its live
     fields, sent only when one changed. A missing field means empty/zero. `reset: true` starts a fresh list.
   - `trades` (as each swap is decoded): `{p, t, b, u, pr, mc, lq}` per swap (pool, time, buy, USD size, and the
     pool's price, market cap and liquidity right after it); swaps of the client's open pool also carry `s` (tx) and `w` (wallet)
-  - `stats` every 2s, `event` (launches and graduations), `tape` (recent swaps of a newly opened pool)
-  - client → server: `{type:"config", list, limit, minLiq, genuine}`, `{type:"select", id}`
+  - `stats` every 2s, `event` (launches and graduations, and the ATH watch's `drawdown` / `athReset`), `tape` (recent
+    swaps of a newly opened pool), `ath` (the ATH watch, every 2s when it changed), `breakout` (the Breakout record's
+    stats) and `pins` (pins as a browser saves them), each every 2s when changed
+  - client → server: `{type:"config", list, limit, minLiq, genuine}`, `{type:"select", id}`, `{type:"pin", mint, id}`,
+    `{type:"unpin", mint}`, `{type:"pins", pins}` (a browser's saved pins; the server takes back any it doesn't have)
 - `GET /api/stats` → `perf`: ranking tick time, bytes per second per client (before and after compression), memory, CPU
   - `genuine` defaults to true: flagged pools are left out unless you pass `genuine=false`
 
 Each pool row carries `holders` (wallets holding the coin, from Jupiter's token index, re-fetched every
 minute for coins on a connected client's list), `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
 `progress`, `graduated`, `created`, `icon`, `mint`, `links` (`{ x, web, tg }` from the coin's metadata file, set by its creator), `bundledPct`, `block0Pct`, `bundleHeldPct`, `bundleWallets`, `bundleFunded`, `bundleEst`
-(see Launch bundles), `flags` (reasons it looks inorganic, empty if none), `genuine`
-and, on the trending and both lists, `score`.
+(see Launch bundles), `ath`, `athAt`, `ddAt` (coins the ATH watch follows), `flagMcap`, `flagAt`, `peakX`, `hitAt` (coins the
+Breakout list flagged), `pin` (`{ at, entry, peak, peakAt, dead, deadAt }` on pinned coins; `gone` when no pool is left), `flags` (reasons it looks inorganic, empty if none), `genuine`
+and, on the trending, both and breakout lists, `score`.
 
 **Genuine filter** (thresholds in `GENUINE` at the top of `lib/market.js`). A pool is flagged when any of these hold:
 
@@ -295,6 +305,47 @@ minute and checked each about 20s after launch, with no Jito rate limiting. That
 second it allows itself, so at busier times checks queue up. On one coin its result matched isitbundled.com
 exactly: 17% bundled, the same 5 wallets and percentages, 100% sold.
 
+## ATH watch
+
+Every coin that reaches the top 10 of Top volume (as a fresh dashboard shows it: Genuine only, every venue) is followed
+from then on, even after it drops out (`lib/ath.js`):
+
+- **ATH:** the highest market cap the server has seen. On entry it's seeded from the coin's hourly highs (any of its
+  pools, up to 24h back, valued at today's quote price), then every swap counts, so short wicks between ranking ticks do too.
+  A pump.fun coin is followed from its curve to its AMM pool after graduation.
+- **Drawdown:** when the market cap falls to 20% of the ATH or less, `ddAt` marks when (an `event` with `kind: "drawdown"`
+  goes to every client, and the server logs it). It's marked once per high.
+- **Reset:** a new ATH clears the drawdown and the watch starts over from the new high (`kind: "athReset"` if it had
+  been marked).
+
+Each entry also carries `rank` (place in the top 10 now, or null), `bestRank`, `topAt` (last time in the top 10),
+`ddLow` (lowest since the drawdown), `drawdowns` and `resets` (counts). Coins without a swap for a day are dropped.
+The dashboard shows the watch in the side panel, tags drawdowns and resets in the launches feed, and has optional
+ATH and From ATH list columns.
+
+## Breakout list
+
+A screen for setups that tend to come before a 2×, not a prediction (`lib/breakout.js`). A coin must pass every gate
+(thresholds in `GATES`): Genuine, deployer not a known bundler, not in an ATH-watch drawdown, $3k+ liquidity, $5k–$2M
+market cap, 10+ swaps and 8+ traders in 5 minutes (traders skipped on LaunchLab), buys at least half of swaps, under 20%
+of supply bundled at launch and under 10% still held by the bundle, 5m change above -10% and 1h change under +400%.
+
+The setup score (0–100, listed from 40) weighs room to grow (log of market cap between the bounds) 25%, buy share 20%,
+volume pace against the coin's own hour 20%, traders 15%, pool depth (liquidity / market cap) 10% and curve progress 10%,
+and is cut by 30% for coins already up over 150% in the hour. `why` lists the parts that stood out.
+
+**Record:** every coin that makes the list (as a fresh dashboard shows it) is kept for a day with its market cap when
+first flagged, its peak since (every swap counts) and `hitAt`, when it first reached 2×. The hit rate counts only coins
+flagged over 6 hours ago, so fresh flags aren't counted as misses.
+
+## Pins
+
+Coins pinned on the Breakout list (`lib/pins.js`) are followed by mint, so a graduated coin's AMM pool takes over from
+its curve, with their market cap when pinned and their peak since. A pin is `dead` while any of these hold: liquidity
+pulled or the curve sold out, down 80% from its peak since pinned, no swaps for 30 minutes, or no pool seen for 5 minutes
+(a coin with no pool left is listed as a stand-in row). Pins are saved to `data/pins.json` until unpinned; the
+dashboard also keeps them in browser storage and sends them on every connect, so a server that lost them takes them back.
+
 ## Snapshot
 
 The server's state lives in memory, and is saved to `data/snapshot.json.gz` every minute and when it stops (Ctrl+C,
@@ -305,6 +356,7 @@ a closed terminal window, or a kill signal). On start, the snapshot is restored 
 - **Token info:** names, logos, links and holder counts of those pools.
 - **Bundle detector:** the launches it's following, with their launch-slot buys, bundles found, insider holdings and
   check/funding progress. A check or trace cut off mid-way runs again.
+- **ATH watch:** every coin it follows, with its high and drawdown state.
 
 Not kept: the 5-minute swap window and the live tapes, which are stale within minutes anyway. Buckets carry their own
 time, so anything past 24 hours drops out as usual, and pools quiet for 30 minutes are cleaned up as before. Swaps
