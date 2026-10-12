@@ -122,7 +122,8 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
-- `GET /api/pools?list=trending|top|both|breakout&limit=100&minLiq=0&genuine=true`: a ranked pool list
+- `GET /api/pools?list=trending|top|both|breakout&limit=100&minLiq=0&genuine=true&maxAge=0`: a ranked pool list
+  (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
   - `both`: the union of the two (up to `limit` each); every row carries `rankT` and/or `rankV`, its place in
@@ -137,8 +138,8 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   (`min`: smallest bundled %)
 - `GET /api/bundle-wallets?limit=100`: this server's compiled bundler-wallet DB, most launches first
 - `GET /api/ath`: the ATH watch (see below): every coin that reached the Top volume top 10, its current top-10 coins first
-- `GET /api/breakout`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX) and every coin
-  flagged in the last day with its market cap then (`entry`), `peak` and `hitAt`
+- `GET /api/breakout?limit=1000`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX, `since`,
+  and the same for the last day under `day`) and the coins it flagged, newest first, with their market cap then (`entry`), `peak` and `hitAt`
 - `GET /api/pins`: pinned coins with their entry, peak, current market cap and `dead` reasons
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a
@@ -149,7 +150,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   - `stats` every 2s, `event` (launches and graduations, and the ATH watch's `drawdown` / `athReset`), `tape` (recent
     swaps of a newly opened pool), `ath` (the ATH watch, every 2s when it changed), `breakout` (the Breakout record's
     stats) and `pins` (pins as a browser saves them), each every 2s when changed
-  - client → server: `{type:"config", list, limit, minLiq, genuine}`, `{type:"select", id}`, `{type:"pin", mint, id}`,
+  - client → server: `{type:"config", list, limit, minLiq, genuine, maxAge}`, `{type:"select", id}`, `{type:"pin", mint, id}`,
     `{type:"unpin", mint}`, `{type:"pins", pins}` (a browser's saved pins; the server takes back any it doesn't have)
 - `GET /api/stats` → `perf`: ranking tick time, bytes per second per client (before and after compression), memory, CPU
   - `genuine` defaults to true: flagged pools are left out unless you pass `genuine=false`
@@ -157,7 +158,8 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 Each pool row carries `holders` (wallets holding the coin, from Jupiter's token index, re-fetched every
 minute for coins on a connected client's list), `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
 `progress`, `graduated`, `created`, `icon`, `mint`, `links` (`{ x, web, tg }` from the coin's metadata file, set by its creator), `bundledPct`, `block0Pct`, `bundleHeldPct`, `bundleWallets`, `bundleFunded`, `bundleEst`
-(see Launch bundles), `ath`, `athAt`, `ddAt` (coins the ATH watch follows), `flagMcap`, `flagAt`, `peakX`, `hitAt` (coins the
+(see Launch bundles), `ath`, `athAt` (every coin's highest market cap this server has seen, on any of its pools, at today's quote
+price), `ddAt` (coins the ATH watch follows), `flagMcap`, `flagAt`, `peakX`, `hitAt` (coins the
 Breakout list flagged), `pin` (`{ at, entry, peak, peakAt, dead, deadAt }` on pinned coins; `gone` when no pool is left), `flags` (reasons it looks inorganic, empty if none), `genuine`
 and, on the trending, both and breakout lists, `score`.
 
@@ -320,8 +322,11 @@ from then on, even after it drops out (`lib/ath.js`):
 
 Each entry also carries `rank` (place in the top 10 now, or null), `bestRank`, `topAt` (last time in the top 10),
 `ddLow` (lowest since the drawdown), `drawdowns` and `resets` (counts). Coins without a swap for a day are dropped.
-The dashboard shows the watch in the side panel, tags drawdowns and resets in the launches feed, and has optional
-ATH and From ATH list columns.
+The dashboard shows the watch in the side panel and tags drawdowns and resets in the launches feed.
+
+Every pool also keeps the highest price it has traded at (`hiPx`, saved in the snapshot), so every coin's row has an
+`ath`, not only the watched ones: the optional ATH and From ATH list columns cover the whole list, and From ATH turns red
+at 80% or more below the high.
 
 ## Breakout list
 
@@ -334,9 +339,11 @@ The setup score (0–100, listed from 40) weighs room to grow (log of market cap
 volume pace against the coin's own hour 20%, traders 15%, pool depth (liquidity / market cap) 10% and curve progress 10%,
 and is cut by 30% for coins already up over 150% in the hour. `why` lists the parts that stood out.
 
-**Record:** every coin that makes the list (as a fresh dashboard shows it) is kept for a day with its market cap when
+**Record:** every coin that makes the list (as a fresh dashboard shows it, any age) is kept for good with its market cap when
 first flagged, its peak since (every swap counts, followed from its curve to its AMM pool after graduation) and `hitAt`, when it first reached 2×. The hit rate counts only coins
-flagged over 6 hours ago, so fresh flags aren't counted as misses.
+flagged over 6 hours ago, so fresh flags aren't counted as misses. A coin listed again keeps its first flag. The record is
+saved to `data/breakout-record.json` every minute and on shutdown (not in the snapshot, which is dropped after a day); only
+past 200,000 coins are the oldest unlisted ones dropped.
 
 ## Pins
 

@@ -124,8 +124,9 @@ const athWatch = createAthWatch({
   },
 });
 
-// Breakout list's record: each coin's market cap when it first made the list, its peak since, and whether it reached 2x
-const breakout = createBreakoutTracker();
+// Breakout list's record: each coin's market cap when it first made the list, its peak since, and whether it reached 2x.
+// Kept for good in its own file (a snapshot over a day old is dropped)
+const breakout = createBreakoutTracker({ file: path.join(DATA_DIR, 'breakout-record.json'), log });
 // coins the viewer pinned: followed by mint until unpinned, with their peak since pinning and whether they look dead
 const pins = createPins({ file: path.join(DATA_DIR, 'pins.json'), log });
 let pinRows = []; // one row per pin, rebuilt each tick and added to the Breakout list
@@ -136,17 +137,18 @@ const snap = snapshot?.load();
 if (snap) {
   const pools = market.restore(snap.pools), launches = launchBundles.restore(snap.launches);
   athWatch.restore(snap.ath);
-  breakout.restore(snap.breakout);
+  breakout.restore(snap.breakout); // snapshots from before the record had its own file
   meta.restore(snap.meta);
   for (const p of market.pools.values()) if (!meta.get(p.mint)?.icon) meta.request(p.mint);
   log(`snapshot from ${Math.round((Date.now() - snap.at) / 1000)}s ago restored: ${pools} pools, ${launches} launches being followed`);
 }
 function saveSnapshot() {
   pins.save();
+  breakout.save();
   if (!snapshot) return;
   const mints = [];
   for (const p of market.pools.values()) if (p.ready) mints.push(p.mint, p.quoteMint);
-  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump(), breakout: breakout.dump() });
+  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump() });
 }
 setInterval(saveSnapshot, 60e3).unref();
 // Ctrl+C, a closed terminal window, or a kill: save, then exit (the wallet DB, funding cache and Helius usage
@@ -291,7 +293,9 @@ function rankTrending(eligible, limit, now) {
     .sort((a, b) => b.score - a.score).slice(0, limit);
 }
 function pick(rows, cfg) {
-  const eligible = rows.filter(r => r.liq >= cfg.minLiq && (!cfg.genuine || r.genuine) && (!cfg.venues || cfg.venues.includes(r.venue)));
+  const now = Date.now();
+  const eligible = rows.filter(r => r.liq >= cfg.minLiq && (!cfg.genuine || r.genuine) && (!cfg.venues || cfg.venues.includes(r.venue)) &&
+    (!cfg.maxAge || (r.born && now - r.born <= cfg.maxAge))); // coin age filter: coins of unknown age are left out
   if (cfg.list === 'top') return rankTop(eligible, cfg.limit);
   if (cfg.list === 'breakout') return rankBreakout(eligible, cfg.limit, Date.now());
   const trending = rankTrending(eligible, cfg.limit, Date.now());
@@ -311,6 +315,7 @@ function readConfig(m) {
     // hide flagged pools unless explicitly asked for everything
     genuine: !(m.genuine === false || m.genuine === 'false' || m.genuine === '0'),
     minLiq: Math.max(0, +m.minLiq || 0),
+    maxAge: Math.max(0, Math.min(365 * 86400e3, +m.maxAge || 0)), // ms; 0 = any age
     venues: Array.isArray(m.venues) && m.venues.length ? m.venues.map(String) : null,
   };
 }
@@ -441,7 +446,7 @@ function snapshotFor(c, pools, reset) {
 let pickCache = new Map();
 // pinned coins are added to the Breakout list (whatever its filters) unless they're already on it
 function pickShared(cfg, selected) {
-  const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + (cfg.venues || '');
+  const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + cfg.maxAge + '|' + (cfg.venues || '');
   let base = pickCache.get(key);
   if (!base) pickCache.set(key, base = pick(latestRows, cfg));
   let out = base;
@@ -473,8 +478,8 @@ setInterval(() => {
   sample(perf.rowsMs, performance.now() - t0);
   encoded = new Map(); pickCache = new Map();
   athWatch.rank(pickShared(ATH_LIST), latestRows);
-  // coins the ATH watch follows carry their high and drawdown on every list
-  for (const r of latestRows) { const a = athWatch.get(r.mint); if (a) { r.ath = a.ath; r.athAt = a.athAt; r.ddAt = a.ddAt; } }
+  // every row has its ATH (lib/market.js); coins the ATH watch follows also carry its drawdown mark
+  for (const r of latestRows) { const a = athWatch.get(r.mint); if (a) { if (a.ath > (r.ath || 0)) { r.ath = a.ath; r.athAt = a.athAt; } r.ddAt = a.ddAt; } }
   pinRows = pins.rows(latestRows);
   for (const r of pinRows) r.pin = pins.info(r.mint);
   // ranked uncached (its rows are copies), so the lists clients get below carry the record's fields
@@ -596,8 +601,10 @@ const server = http.createServer(async (req, res) => {
     // the ATH watch: coins that reached the top 10 of Top volume, their high, and any 80% drawdown since
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), coins: athWatch.list() }));
   } else if (url.pathname === '/api/breakout') {
-    // the Breakout list's record: coins it flagged in the last day, their market cap then, peak since, and the hit rate
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), stats: breakout.stats(), coins: breakout.dump() }));
+    // the Breakout list's record: every coin it has flagged (newest first), its market cap then, peak since, and the hit rate
+    const limit = Math.max(1, Math.min(100_000, +url.searchParams.get('limit') || 1000));
+    const coins = breakout.dump().sort((a, b) => b.flaggedAt - a.flaggedAt).slice(0, limit);
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), stats: breakout.stats(), coins }));
   } else if (url.pathname === '/api/pins') {
     // pinned coins: market cap when pinned, peak since, now, and why each looks dead (if it does)
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), pins: pins.list() }));
