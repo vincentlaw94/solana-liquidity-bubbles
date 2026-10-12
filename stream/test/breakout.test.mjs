@@ -95,3 +95,33 @@ test('dump and restore keep the record across a restart', () => {
   t2.trade({ p: r.id, t: 2000, mc: 85_000 });
   assert.equal(t2.get('A').hitAt, 2000);
 });
+
+test('the record never expires, and a coin listed again keeps its first flag', () => {
+  const t = createBreakoutTracker();
+  const r = row();
+  t.rank([{ ...r, score: 70 }], [r], 0);
+  t.rank([], [r], 30 * 86400e3); // a month later, off the list
+  assert.equal(t.get('A').entry, 40_000);
+  t.rank([{ ...r, mcap: 70_000, score: 70 }], [r], 31 * 86400e3);
+  assert.equal(t.get('A').entry, 40_000);
+  assert.equal(t.get('A').flaggedAt, 0);
+  const s = t.stats(31 * 86400e3);
+  assert.equal(s.flagged, 1);
+  assert.equal(s.since, 0);
+  assert.equal(s.day.flagged, 0); // not flagged in the last day
+});
+
+test('the record is saved to its own file and loaded on start', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const file = path.join(mkdtempSync(path.join(tmpdir(), 'brk-')), 'breakout-record.json');
+  const a = createBreakoutTracker({ file }), r = row();
+  a.rank([{ ...r, score: 70 }], [r], 1000);
+  a.trade({ p: r.id, t: 2000, mc: 90_000 });
+  a.save();
+  const b = createBreakoutTracker({ file });
+  assert.equal(b.get('A').entry, 40_000);
+  assert.equal(b.get('A').hitAt, 2000);
+  assert.equal(b.isListed('A'), false);
+});

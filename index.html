@@ -60,6 +60,30 @@ header {
 .seg button { background: transparent; border: 0; padding: 5px 10px; cursor: pointer; color: var(--muted); font-size: 12px; }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button[aria-pressed="true"] { background: var(--raise); color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+/* coin age filter: favourite durations as buttons, every duration in the dropdown (star one to make it a button) */
+.agepick { position: relative; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.agepick .seg button { padding: 5px 8px; font-variant-numeric: tabular-nums; }
+.age-more { background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); cursor: pointer; width: 26px; height: 26px; padding: 0; display: grid; place-items: center; }
+.age-more:hover, .age-more:focus-visible, .age-more[aria-expanded="true"] { color: var(--fg); background: var(--raise); }
+.age-more svg { width: 12px; height: 12px; transition: transform .15s; }
+.age-more[aria-expanded="true"] svg { transform: rotate(180deg); }
+.agemenu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; width: 210px; max-height: min(70vh, 520px); overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, .5); padding: 4px 0; }
+.agemenu .grp + .grp { border-top: 1px solid var(--line); }
+.agemenu .grp-h { all: unset; box-sizing: border-box; width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 10px 14px 6px;
+  font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); cursor: pointer; }
+.agemenu .grp-h:hover, .agemenu .grp-h:focus-visible { color: var(--muted); }
+.agemenu .grp-h svg { width: 11px; height: 11px; transition: transform .15s; }
+.agemenu .grp-h[aria-expanded="false"] svg { transform: rotate(180deg); }
+.agemenu .item { display: flex; align-items: center; }
+.agemenu .item .pick { all: unset; box-sizing: border-box; flex: 1; padding: 8px 14px; font-size: 13px; color: var(--fg); cursor: pointer; }
+.agemenu .item:hover, .agemenu .item:focus-within { background: var(--raise); }
+.agemenu .item.on { background: var(--fg); }
+.agemenu .item.on .pick { color: var(--bg); font-weight: 600; }
+.agemenu .star { all: unset; width: 34px; height: 30px; display: grid; place-items: center; cursor: pointer; color: var(--faint); font-size: 15px; }
+.agemenu .star[aria-pressed="true"] { color: var(--accent); }
+.agemenu .item.on .star[aria-pressed="true"] { color: #c98a10; }
+.agemenu .star:hover, .agemenu .star:focus-visible { color: var(--accent); }
 .ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 select, input[type="search"] {
   background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font-size: 12px; text-transform: none; letter-spacing: 0;
@@ -306,6 +330,14 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       <button type="button" data-v="both" aria-pressed="false" title="Trending and Top volume side by side">Both</button>
       <button type="button" data-v="breakout" aria-pressed="false" title="Safer small caps whose trading looks like the setups before a 2x. A screen, not a prediction: see its record in the side panel">Breakout</button>
     </div>
+    <div class="agepick" id="agePick">
+      <span id="ageLabel">Age</span>
+      <div class="seg" role="group" aria-labelledby="ageLabel" id="ageFavs"></div>
+      <button type="button" class="age-more" id="ageMore" aria-haspopup="true" aria-expanded="false" aria-controls="ageMenu" title="All coin ages">
+        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 4.5L6 8l3.5-3.5"/></svg>
+      </button>
+      <div class="agemenu" id="ageMenu" hidden></div>
+    </div>
     <label class="ctl" for="colorBy">Color
       <select id="colorBy">
         <option value="m5" selected>Price Δ 5m</option>
@@ -386,13 +418,14 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     </section>
 
     <section id="breakoutSection" hidden>
-      <div class="label" title="Every coin that makes the Breakout list (Genuine only) is recorded at its market cap that moment, then followed for a day. Settled = flagged over 6h ago, so fresh flags don't count as misses.">Breakout record · last 24h</div>
+      <div class="label" title="Every coin that makes the Breakout list (Genuine only, any age) is recorded at its market cap that moment and followed for good, even after it drops off. Settled = flagged over 6h ago, so fresh flags don't count as misses." id="bLabel">Breakout record</div>
       <div class="stats">
         <div class="stat"><b id="bFlagged">–</b><small>Coins flagged</small></div>
         <div class="stat"><b id="bHits">–</b><small>Reached 2× after</small></div>
         <div class="stat"><b id="bRate">–</b><small id="bRateLabel">Hit rate (settled)</small></div>
         <div class="stat"><b id="bMedian">–</b><small>Median best since flagged</small></div>
       </div>
+      <p class="note" id="bDay"></p>
       <p class="note">A screen for setups, not a forecast. Most launchpad coins go to zero, and a high score is no promise of a 2×. Judge the list by this record, and never trade more than you can lose.</p>
     </section>
 
@@ -442,7 +475,7 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
-const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], size: 'log', view: 'list', panel: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
+const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], ages: {}, ageFavs: null, ageOpen: null, size: 'log', view: 'list', panel: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
                 lastUpdate: 0, error: null };
 let nodes = [];
 const byId = new Map();
@@ -511,7 +544,8 @@ function fromStream(r, i) {
     mint: r.mint,
     deployer: r.deployer || null,
     holders: r.holders ?? null,
-    ath: r.ath || null, athAt: r.athAt || null, ddAt: r.ddAt || null, // ATH watch (coins that reached the Top volume top 10)
+    ath: r.ath || null, athAt: r.athAt || null, // every coin's highest market cap this server has seen
+    ddAt: r.ddAt || null, // ATH watch's 80% drawdown mark (coins that reached the Top volume top 10)
     why: r.why || [], // Breakout: why the coin scored
     pin: r.pin || null, gone: !!r.gone, // pinned by the viewer: { at, entry, peak, peakAt, dead: [reasons] | null, deadAt }; gone: no pool left
     flagMcap: r.flagMcap || null, flagAt: r.flagAt || null, peakX: r.peakX || null, hitAt: r.hitAt || null, // Breakout record
@@ -570,7 +604,7 @@ const IMG_BASE = location.port === '8787' ? '' : STREAM_URL.replace(/^ws/, 'http
 const imgSrc = u => IMG_BASE + '/img?u=' + encodeURIComponent(u);
 const feed = [];
 function streamSend(m) { if (stream.open) stream.ws.send(JSON.stringify(m)); }
-function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, genuine: state.genuine }); }
+function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, genuine: state.genuine, maxAge: AGES.get(curAge())?.ms || 0 }); }
 function streamConnect() {
   if (stream.ws) return;
   clearTimeout(stream.timer);
@@ -1338,14 +1372,14 @@ const COLUMNS = {
   ath: { label: 'ATH', sort: n => n.ath ?? -Infinity,
     set: (td, n) => {
       setT(td, n.ath ? usd(n.ath) : '–');
-      const t = n.ath ? 'Highest market cap seen, ' + ago(n.athAt) + ' ago' : 'Not followed: only coins that reached the Top volume top 10 are';
+      const t = n.ath ? 'Highest market cap this server has seen, ' + ago(n.athAt) + ' ago' : 'No high seen yet';
       if (td.title !== t) td.title = t;
     } },
   fromAth: { label: 'From ATH', sort: n => n.ath ? athDrop(n.mcap, n.ath) : -Infinity,
     set: (td, n) => {
       const v = n.ath ? athDrop(n.mcap, n.ath) : NaN;
-      setT(td, n.ath ? (v > -0.05 ? 'ATH' : pct(v)) : '–'); setC(td, n.ddAt ? 'down' : '');
-      const t = n.ddAt ? 'Down 80% from its ' + usd(n.ath) + ' high since ' + ago(n.ddAt) + ' ago; a new high resets it' : n.ath ? 'From its ' + usd(n.ath) + ' high' : '';
+      setT(td, n.ath ? (v > -0.05 ? 'ATH' : pct(v)) : '–'); setC(td, n.ddAt || v <= -80 ? 'down' : '');
+      const t = n.ddAt ? 'Down 80% from its ' + usd(n.ath) + ' high since ' + ago(n.ddAt) + ' ago; a new high resets it' : n.ath ? 'From its ' + usd(n.ath) + ' high, ' + ago(n.athAt) + ' ago' : '';
       if (td.title !== t) td.title = t;
     } },
   coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
@@ -1556,6 +1590,7 @@ function saveSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       view: state.view, list: state.list, panel: state.panel, colorBy: state.colorBy, size: state.size,
       group: state.group, genuine: state.genuine, hidden: state.hidden, pins: state.pins, sort: state.sort, columns: state.columns,
+      ages: state.ages, ageFavs: state.ageFavs, ageOpen: state.ageOpen,
     }));
   } catch {}
 }
@@ -1575,6 +1610,10 @@ function restoreSettings() {
       .map(h => ({ mint: h.mint, sym: String(h.sym || '').slice(0, 40) })).slice(-500);
     hiddenMints = new Set(state.hidden.map(h => h.mint));
   }
+  if (s.ages && typeof s.ages === 'object') for (const l of Object.keys(LISTS)) { if (AGES.has(s.ages[l])) state.ages[l] = s.ages[l]; }
+  else if (AGES.has(s.maxAge)) for (const l of Object.keys(LISTS)) state.ages[l] = s.maxAge; // one age for every list, saved before ages were per list
+  if (Array.isArray(s.ageFavs)) state.ageFavs = s.ageFavs.filter(k => AGES.has(k));
+  if (s.ageOpen && typeof s.ageOpen === 'object') state.ageOpen = Object.fromEntries(AGE_GROUPS.map(([g]) => [g, s.ageOpen[g] !== false]));
   if (Array.isArray(s.pins)) state.pins = s.pins.map(cleanPin).filter(Boolean).slice(0, 200);
   if (s.sort && COLUMNS[s.sort.key] && (s.sort.dir === 1 || s.sort.dir === -1)) state.sort = { key: s.sort.key, dir: s.sort.dir };
   state.columns = normalizeColumns(s.columns);
@@ -1589,6 +1628,9 @@ function renderBreakout(b) {
   setT($('bRate'), b.hitRate == null ? '–' : Math.round(b.hitRate * 100) + '%');
   setT($('bRateLabel'), b.settled ? 'Hit rate (' + b.settledHits + ' of ' + b.settled + ' settled)' : 'Hit rate (none settled yet)');
   setT($('bMedian'), b.medianPeakX == null ? '–' : b.medianPeakX.toFixed(2) + '×');
+  setT($('bLabel'), b.since ? 'Breakout record · since ' + new Date(b.since).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Breakout record');
+  const d = b.day;
+  setT($('bDay'), d ? 'Last 24h: ' + d.flagged + ' flagged, ' + d.hits + ' reached 2×' + (d.settled ? ' (' + Math.round(100 * d.hitRate) + '% of ' + d.settled + ' settled)' : '') + '.' : '');
 }
 // ---------- ATH watch ----------
 // Coins that reached the Top volume top 10, sent by the server every 2s: its current top 10 first, then the rest.
@@ -1748,9 +1790,9 @@ function renderPool(refreshOnly) {
 }
 const progressText = n => n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation';
 // in-place refresh of every number in the open pool panel
-// the ATH watch's view of a coin (only coins that reached the Top volume top 10 are followed)
+// a coin's high and how far it is below it; the ATH watch's drawdown mark for coins it follows
 function athText(n) {
-  if (!n.ath) return 'not followed';
+  if (!n.ath) return '–';
   const d = athDrop(n.mcap, n.ath);
   return usd(n.ath) + (d > -0.05 ? ' (at it)' : ' (' + pct(d) + ')') + (n.ddAt ? ' · −80% ' + ago(n.ddAt) + ' ago' : '');
 }
@@ -1762,7 +1804,7 @@ function refreshPool(n) {
   const put = (k, t) => { const e = f(k); if (e) setT(e, t); };
   put('vol24', usd(n.vol24)); put('vol1', usd(n.vol1)); put('vol5', usd(n.vol5));
   put('holders', n.holders != null ? n.holders.toLocaleString() : '–');
-  put('ath', athText(n)); { const e = f('ath'); if (e) setC(e, n.ddAt ? 'down' : ''); }
+  put('ath', athText(n)); { const e = f('ath'); if (e) setC(e, n.ddAt || (n.ath && athDrop(n.mcap, n.ath) <= -80) ? 'down' : ''); }
   put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
   if (n.progress != null) { put('progressText', progressText(n)); const b = f('progressBar'); if (b) setS(b, 'width', (n.progress * 100).toFixed(1) + '%'); }
   for (const k of ['m5', 'h1', 'h24']) { const e = f('chg_' + k); if (e) { setT(e, pct(n.chg[k])); setC(e, cls(n.chg[k])); } }
@@ -1798,6 +1840,72 @@ function segment(id, fn) {
     fn(b.dataset.v);
   });
 }
+// ---------- coin age filter ----------
+// Shows only coins younger than the chosen age (on the server, so each list still fills to its limit). Each list
+// remembers its own age. Favourites
+// (starred in the dropdown) sit as buttons beside "All"; the chosen age gets a button too while it's selected.
+const AGE_GROUPS = [
+  ['Seconds', 's', 1e3, [15, 30], 'second'],
+  ['Minutes', 'm', 60e3, [1, 3, 5, 15, 30], 'minute'],
+  ['Hours', 'h', 3600e3, [1, 2, 4, 6, 12], 'hour'],
+  ['Days', 'd', 86400e3, [1, 3, 7, 30], 'day'],
+];
+const AGES = new Map();
+for (const [, u, ms, ns, word] of AGE_GROUPS) for (const n of ns) AGES.set(n + u, { key: n + u, ms: n * ms, long: n + ' ' + word + (n === 1 ? '' : 's') });
+const AGE_FAVS = ['5m', '15m', '1h', '6h', '1d'];
+const ICON_CHEV = '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 7.5L6 4l3.5 3.5"/></svg>';
+const ageFavs = () => state.ageFavs || AGE_FAVS;
+// each list keeps its own age ('' = any age); the favourites are shared
+const curAge = () => state.ages[state.list] || '';
+function renderAgePick() {
+  const favs = ageFavs().filter(k => AGES.has(k));
+  if (curAge() && !favs.includes(curAge())) favs.push(curAge());
+  favs.sort((a, b) => AGES.get(a).ms - AGES.get(b).ms);
+  setH($('ageFavs'), ['', ...favs].map(k => '<button type="button" data-age="' + k + '" aria-pressed="' + (curAge() === k) + '" title="' +
+    (k ? 'Coins under ' + AGES.get(k).long + ' old' : 'Coins of any age') + '">' + (k || 'All') + '</button>').join(''));
+  const open = state.ageOpen || {};
+  setH($('ageMenu'), AGE_GROUPS.map(([name, u]) => {
+    const shut = open[name] === false;
+    return '<div class="grp"><button type="button" class="grp-h" data-grp="' + name + '" aria-expanded="' + !shut + '">' + name + ICON_CHEV + '</button>' +
+      (shut ? '' : [...AGES.values()].filter(a => a.key.endsWith(u)).map(a => {
+        const fav = ageFavs().includes(a.key);
+        return '<div class="item' + (curAge() === a.key ? ' on' : '') + '"><button type="button" class="pick" data-age="' + a.key + '">' + a.long + '</button>' +
+          '<button type="button" class="star" data-star="' + a.key + '" aria-pressed="' + fav + '" aria-label="' + (fav ? 'Remove ' : 'Add ') + a.long + (fav ? ' from' : ' to') + ' the buttons">' + (fav ? '★' : '☆') + '</button></div>';
+      }).join('')) + '</div>';
+  }).join(''));
+}
+function setAge(k) {
+  if (k === curAge()) return;
+  if (k) state.ages[state.list] = k; else delete state.ages[state.list];
+  streamConfig(); // the server answers with the filtered list right away
+  renderAgePick(); saveSettings();
+}
+function ageMenu(open) {
+  $('ageMenu').hidden = !open;
+  $('ageMore').setAttribute('aria-expanded', String(open));
+}
+$('agePick').addEventListener('click', e => {
+  const t = e.target.closest('button'); if (!t) return;
+  if (t.id === 'ageMore') return ageMenu($('ageMenu').hidden);
+  if (t.dataset.star) {
+    const k = t.dataset.star, favs = ageFavs();
+    state.ageFavs = favs.includes(k) ? favs.filter(x => x !== k) : favs.concat(k);
+    renderAgePick(); saveSettings();
+    $('ageMenu').querySelector('[data-star="' + k + '"]')?.focus();
+  } else if (t.dataset.grp) {
+    const g = t.dataset.grp;
+    state.ageOpen = { ...state.ageOpen, [g]: state.ageOpen?.[g] === false };
+    renderAgePick(); saveSettings();
+    $('ageMenu').querySelector('[data-grp="' + g + '"]')?.focus();
+  } else if (t.dataset.age != null) {
+    setAge(t.dataset.age);
+    if (t.classList.contains('pick')) { ageMenu(false); $('ageMore').focus(); }
+  }
+});
+// a click outside closes it (a star or section header re-renders the menu, leaving its target detached: that's inside)
+document.addEventListener('click', e => { if (!$('ageMenu').hidden && e.target.isConnected && !$('agePick').contains(e.target)) ageMenu(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('ageMenu').hidden) { ageMenu(false); $('ageMore').focus(); } });
+
 function applyListUi() {
   $('boardLabel').textContent = 'Largest pools on the map';
   $('breakoutSection').hidden = state.list !== 'breakout';
@@ -1808,6 +1916,7 @@ segment('srcSeg', v => {
   state.list = v; select(null);
   streamConfig(); // the server answers with the new list right away
   setupPanes(); applyListUi(); renderPanels(); rebuildList(); // Breakout adds its own columns
+  renderAgePick(); // each list has its own age
 });
 // the right-hand panel (stats, open pool, launches) can be hidden to give the list the full width
 function setPanel(on) {
@@ -1849,7 +1958,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---------- boot ----------
-restoreSettings(); syncControls(); setPanel(state.panel); setupPanes(); renderHead(); renderHiddenBtn(); setView(state.view);
+restoreSettings(); syncControls(); renderAgePick(); setPanel(state.panel); setupPanes(); renderHead(); renderHiddenBtn(); setView(state.view);
 resize(); applyListUi();
 startFrames();
 setInterval(() => {

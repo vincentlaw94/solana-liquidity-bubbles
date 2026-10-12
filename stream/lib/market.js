@@ -44,7 +44,7 @@ export class Market {
   // pool fields a snapshot keeps (see dump)
   static KEEP = ['id', 'program', 'platform', 'mint', 'quoteMint', 'baseDec', 'quoteDec', 'quoteRes', 'price', 'progress', 'fundTarget',
     'graduated', 'successor', 'firstSeen', 'lastTs', 'lastEventAt', 'created', 'createdName', 'creator', 'baseSupply', 'quoteSupply',
-    'baseAuth', 'quoteAuth', 'peakQuoteRes', 'mins', 'hours'];
+    'baseAuth', 'quoteAuth', 'peakQuoteRes', 'mins', 'hours', 'hiPx', 'hiAt'];
 
   constructor({ accounts, meta, prices, emit, bundlers = null, launchBundles = null, pumpswapAll = false }) {
     // bundlers: isitbundled.com's wallet list; launchBundles: this server's own launch-bundle detector (lib/bundles.js)
@@ -192,6 +192,7 @@ export class Market {
       if (p.progress >= 1 && !p.graduated) { p.graduated = true; this.graduated(p, p.id); }
     }
     if (!isFinite(p.price)) p.price = 0;
+    if (p.price > (p.hiPx || 0)) { p.hiPx = p.price; p.hiAt = ev.at; } // highest price ever seen: every coin's ATH
     if (p.quoteRes > (p.peakQuoteRes || 0)) p.peakQuoteRes = p.quoteRes;
     if (!(quote >= 0) || !(base >= 0)) return; // malformed event: never let it reach clients
     this.launchBundles?.onTrade(p, ev);
@@ -306,8 +307,14 @@ export class Market {
         progress: p.progress, graduated: p.graduated, firstSeen: p.firstSeen, created: p.created || null, lastTs: p.lastTs,
         // coin age: when the token first got a pool (Jupiter), else the launch this server saw on-chain
         born: tok.born || (!flip && p.created) || null,
+        // ATH: highest market cap this server has seen, at today's quote price (flipped pools: the token is the quote)
+        ath: !flip && p.hiPx ? this.value(p, p.hiPx, 0).mcap : null, athAt: !flip ? p.hiAt || null : null,
       });
     }
+    // a coin's ATH covers all its pools (its curve's high stays its ATH after it graduates to an AMM pool)
+    const hi = new Map();
+    for (const r of out) { const h = hi.get(r.mint); if (r.ath > (h?.ath || 0)) hi.set(r.mint, r); }
+    for (const r of out) { const h = hi.get(r.mint); if (h && h !== r) { r.ath = h.ath; r.athAt = h.athAt; } if (r.ath && r.mcap > r.ath) { r.ath = r.mcap; r.athAt = r.lastTs; } }
     return out;
   }
 
@@ -344,6 +351,8 @@ export class Market {
         const mcap = this.value(p, b.hi || b.open, 0).mcap;
         if (mcap > (best?.mcap || 0)) best = { mcap, at: b.hiAt || b.h * 3600e3 };
       }
+      const mcap = p.hiPx ? this.value(p, p.hiPx, 0).mcap : 0;
+      if (mcap > (best?.mcap || 0)) best = { mcap, at: p.hiAt };
     }
     return best;
   }
@@ -393,6 +402,7 @@ export class Market {
       const p = Object.assign(Market.blank(o.id, o.program), o, { ready: true });
       p.vol60 = p.mins.reduce((t, b) => t + b.q, 0);
       p.vol24 = p.hours.reduce((t, b) => t + b.q, 0);
+      if (p.hiPx == null) for (const b of p.hours) if ((b.hi || b.open) > (p.hiPx || 0)) { p.hiPx = b.hi || b.open; p.hiAt = b.hiAt || b.h * 3600e3; } // snapshots from before hiPx
       this.pools.set(p.id, p);
       this.prices.track(p.quoteMint);
       n++;

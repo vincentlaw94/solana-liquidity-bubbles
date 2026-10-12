@@ -6,6 +6,8 @@
 // A coin must first pass every gate (safety and real activity); the score then weighs room to grow (small
 // market cap), buy pressure, volume pace against its own hour, breadth of traders, pool depth and bonding-curve
 // progress, and is cut back for coins that already ran in the last hour.
+import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
 
 export const GATES = {
   minLiq: 3000,         // USD in the pool
@@ -74,11 +76,29 @@ export function rankBreakout(eligible, limit, now = Date.now()) {
 }
 
 // Follows every coin that makes the list: its market cap when first listed, its peak since, and when (if) it
-// reached 2x. Coins are followed by mint, from their curve to their AMM pool after graduation, and forgotten a
-// day after they were flagged.
-export function createBreakoutTracker({ target = 2, keepMs = 24 * 3600e3, max = 1000 } = {}) {
+// reached 2x. Coins are followed by mint, from their curve to their AMM pool after graduation, and kept for good:
+// the record is saved to its own file (it would be lost with a snapshot over a day old) and never expires. A coin
+// listed again later keeps its first flag. Only if the record passes `max` coins are the oldest unlisted ones dropped.
+export function createBreakoutTracker({ target = 2, max = 200_000, file = null, log = () => {} } = {}) {
   const coins = new Map();  // mint -> entry
   const byPool = new Map(); // pool id -> mint
+  let listed = new Set();   // mints on the list this tick
+
+  if (file) {
+    try { restore(JSON.parse(readFileSync(file, 'utf8')).coins); }
+    catch (e) { if (e.code !== 'ENOENT') log('breakout record not loaded: ' + e.message); }
+  }
+  function restore(list) {
+    let n = 0;
+    for (const c of list || []) {
+      if (!c?.mint || !(c.entry > 0) || coins.has(c.mint)) continue;
+      const { listed: _, ...entry } = c; // older snapshots carried a listed flag
+      coins.set(c.mint, entry);
+      if (c.pool) byPool.set(c.pool, c.mint);
+      n++;
+    }
+    return n;
+  }
 
   function update(c, mcap, at) {
     if (!(mcap > 0)) return;
@@ -87,19 +107,27 @@ export function createBreakoutTracker({ target = 2, keepMs = 24 * 3600e3, max = 
     if (!c.hitAt && mcap >= c.entry * target) c.hitAt = at;
     if (mcap < c.low) c.low = mcap;
   }
+  function tally(list, now) {
+    const settled = list.filter(c => now - c.flaggedAt >= 6 * 3600e3);
+    const settledHits = settled.filter(c => c.hitAt).length;
+    const xs = list.map(c => c.peak / c.entry).sort((a, b) => a - b);
+    const median = xs.length ? xs[Math.floor(xs.length / 2)] : null;
+    return { flagged: list.length, hits: list.filter(c => c.hitAt).length, settled: settled.length, settledHits,
+      hitRate: settled.length ? settledHits / settled.length : null, medianPeakX: median && Math.round(median * 100) / 100 };
+  }
 
   return {
     // once per ranking tick: the Breakout list and every priced row (for coins that left the list)
     rank(listRows, rows, now = Date.now()) {
-      for (const c of coins.values()) c.listed = false;
+      listed = new Set();
       for (const r of listRows) {
         let c = coins.get(r.mint);
         if (!c) {
           if (!(r.mcap > 0)) continue;
           coins.set(r.mint, c = { mint: r.mint, sym: r.sym, pool: r.id, flaggedAt: now, entry: r.mcap, entryScore: r.score,
-            mcap: r.mcap, at: now, peak: r.mcap, peakAt: now, low: r.mcap, hitAt: null, listed: true });
+            mcap: r.mcap, at: now, peak: r.mcap, peakAt: now, low: r.mcap, hitAt: null });
         }
-        c.listed = true; c.pool = r.id; c.sym = r.sym;
+        listed.add(r.mint); c.pool = r.id; c.sym = r.sym;
         byPool.set(r.id, r.mint);
       }
       // each coin's value from the pool it was flagged on, or once that's gone (a completed curve), its most liquid
@@ -117,7 +145,7 @@ export function createBreakoutTracker({ target = 2, keepMs = 24 * 3600e3, max = 
         byPool.set(r.id, mint);
         update(c, r.mcap, now);
       }
-      this.prune(now);
+      this.prune();
     },
     // every swap, so wicks between ticks count toward the peak
     trade(t) {
@@ -126,35 +154,31 @@ export function createBreakoutTracker({ target = 2, keepMs = 24 * 3600e3, max = 
       if (c && t.p === c.pool && t.mc != null) update(c, t.mc, t.t);
     },
     get: mint => coins.get(mint) || null,
-    // the list's record: coins flagged in the last day, how many reached the target, and the median best multiple.
-    // "settled" coins were flagged over 6h ago, so a fresh flag doesn't count as a miss yet.
+    isListed: mint => listed.has(mint),
+    // the list's record since it started, and over the last day. "settled" coins were flagged over 6h ago, so a
+    // fresh flag doesn't count as a miss yet.
     stats(now = Date.now()) {
       const all = [...coins.values()];
-      const settled = all.filter(c => now - c.flaggedAt >= 6 * 3600e3);
-      const hits = all.filter(c => c.hitAt).length, settledHits = settled.filter(c => c.hitAt).length;
-      const xs = all.map(c => c.peak / c.entry).sort((a, b) => a - b);
-      const median = xs.length ? xs[Math.floor(xs.length / 2)] : null;
-      return { target, flagged: all.length, hits, settled: settled.length, settledHits,
-        hitRate: settled.length ? settledHits / settled.length : null, medianPeakX: median && Math.round(median * 100) / 100 };
+      const since = all.reduce((t, c) => Math.min(t, c.flaggedAt), Infinity);
+      return { target, ...tally(all, now), since: isFinite(since) ? since : null, day: tally(all.filter(c => c.flaggedAt >= now - 24 * 3600e3), now) };
     },
-    prune(now = Date.now()) {
-      for (const [mint, c] of coins) if (!c.listed && c.flaggedAt < now - keepMs) coins.delete(mint);
+    prune() {
       if (coins.size > max) {
-        const old = [...coins.values()].filter(c => !c.listed).sort((a, b) => a.flaggedAt - b.flaggedAt);
+        const old = [...coins.values()].filter(c => !listed.has(c.mint)).sort((a, b) => a.flaggedAt - b.flaggedAt);
         for (const c of old.slice(0, coins.size - max)) coins.delete(c.mint);
       }
       if (byPool.size > coins.size * 4) for (const [id, mint] of byPool) if (!coins.has(mint)) byPool.delete(id);
     },
-    dump: () => [...coins.values()].map(c => ({ ...c, listed: false })),
-    restore(list) {
-      let n = 0;
-      for (const c of list || []) {
-        if (!c?.mint || !(c.entry > 0) || coins.has(c.mint)) continue;
-        coins.set(c.mint, { ...c, listed: false });
-        if (c.pool) byPool.set(c.pool, c.mint);
-        n++;
-      }
-      return n;
+    dump: () => [...coins.values()],
+    restore,
+    // to its file: called every minute and on shutdown
+    save() {
+      if (!file) return;
+      try {
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file + '.tmp', JSON.stringify({ at: Date.now(), target, coins: [...coins.values()] }));
+        renameSync(file + '.tmp', file);
+      } catch (e) { log('breakout record not saved: ' + e.message); }
     },
   };
 }
