@@ -140,6 +140,9 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/ath`: the ATH watch (see below): every coin that reached the Top volume top 10, its current top-10 coins first
 - `GET /api/breakout?limit=1000`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX, `since`,
   and the same for the last day under `day`) and the coins it flagged, newest first, with their market cap then (`entry`), `peak` and `hitAt`
+- `POST /api/clear-volume`: forget the 1h and 24h volume collected so far, so Top volume starts over (the 5-minute window
+  is kept; 1h / 24h price changes restart too, and Trending's pace counts from the clear). Refused from other websites'
+  pages; `/api/stats` → `volumeClearedAt` says when it last ran. The dashboard's Clear volume button (Top volume and Both) calls it
 - `GET /api/pins`: pinned coins with their entry, peak, current market cap and `dead` reasons
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a

@@ -38,7 +38,7 @@ export function breakoutScore(r, now = Date.now(), g = GATES) {
   const buyShare = r.buys5 / trades;
   if (buyShare < g.minBuyShare) return null;
 
-  const minutes = Math.min(60, Math.max(5, (now - r.firstSeen) / 60e3));
+  const minutes = Math.min(60, Math.max(5, (now - (r.volSince ?? r.firstSeen)) / 60e3));
   const avg5 = r.vol60 / (minutes / 5);
   const pace = avg5 > 0 ? r.vol5 / avg5 : 1;
   const parts = {

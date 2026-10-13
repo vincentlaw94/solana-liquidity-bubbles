@@ -360,6 +360,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     </div>
     <button type="button" class="btn" id="hiddenBtn" hidden></button>
     <button type="button" class="btn" id="colBtn" aria-expanded="false" aria-controls="colPanel" hidden>Columns</button>
+    <button type="button" class="btn" id="clearVolBtn" hidden>Clear volume</button>
     <label class="ctl check" for="genuine" title="Hide pools with rug, wash-trading or honeypot red flags"><input type="checkbox" id="genuine" checked> Genuine only</label>
     <label class="ctl" for="q">Find <input type="search" id="q" placeholder="token or pair" autocomplete="off"></label>
     <button type="button" class="btn" id="panelBtn" aria-controls="sidePanel" aria-expanded="true">Hide panel</button>
@@ -619,7 +620,7 @@ function streamConnect() {
   };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if (m.type === 'stats') { stream.stats = m.stats; renderStatus(); return; }
+    if (m.type === 'stats') { stream.stats = m.stats; renderStatus(); renderClearVol(); return; }
     if (m.type === 'pools') {
       if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
       const rows = applySnapshot(m);
@@ -638,7 +639,7 @@ function streamConnect() {
     } else if (m.type === 'event') pushFeed(m);
     else if (m.type === 'ath') { athCoins = m.coins; renderAth(); }
     else if (m.type === 'breakout') renderBreakout(m.stats);
-    else if (m.type === 'pins') mergePins(m.pins);
+    else if (m.type === 'pins') mergePins(m.pins, m.unpinned);
   };
   ws.onclose = () => {
     const wasOpen = stream.open;
@@ -1208,14 +1209,16 @@ function pinButtonHtml(n) {
     (on ? 'Unpin this coin' : 'Pin to the top and keep tracking it') + '" aria-label="' + esc(label) + '" aria-pressed="' + on + '">' + (on ? ICON_PIN_ON : ICON_PIN) + '</button>';
 }
 // This browser's copy of the pins (saved with the other settings): the server's list, plus any it doesn't have,
-// which are sent back to it. Unpinning removes a coin from both.
+// which are sent back to it. Unpinning removes a coin from both: the server also lists recent unpins, so a copy
+// made before one (in this tab or another) is dropped instead of being sent back.
 const validMint = m => typeof m === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(m);
 const num = v => typeof v === 'number' && isFinite(v) && v > 0 ? v : null;
 const cleanPin = p => p && validMint(p.mint) && num(p.entry) && num(p.at) ?
   { mint: p.mint, sym: String(p.sym || '').slice(0, 40), at: p.at, entry: p.entry, peak: num(p.peak) || p.entry, peakAt: num(p.peakAt) || p.at } : null;
-function mergePins(serverPins) {
+function mergePins(serverPins, unpinned) {
   const fromServer = (serverPins || []).map(cleanPin).filter(Boolean), have = new Set(fromServer.map(p => p.mint));
-  const missing = state.pins.filter(p => !have.has(p.mint));
+  const gone = new Map(Array.isArray(unpinned) ? unpinned : []);
+  const missing = state.pins.filter(p => !have.has(p.mint) && !(p.at <= (gone.get(p.mint) || 0)));
   if (missing.length) streamSend({ type: 'pins', pins: missing });
   const next = fromServer.concat(missing);
   if (JSON.stringify(next) !== JSON.stringify(state.pins)) { state.pins = next; saveSettings(); }
@@ -1700,7 +1703,7 @@ function renderPanels() {
   for (const n of vis) { liq += n.liq; vol += n.vol24; vol5 += n.vol5; b += n.buys5; s += n.sells5; }
   setT($('setLabel'), LISTS[state.list] + ' · ' + vis.length + ' on map');
   setT($('sLiq'), usd(liq));
-  setT($('sVolLabel'), '24h volume');
+  setT($('sVolLabel'), volSince() ? 'Volume since ' + clock(volSince()) : '24h volume');
   setT($('sVol'), usd(vol));
   setT($('sVol5'), usd(vol5));
   setT($('sTx5'), (b + s).toLocaleString());
@@ -1832,6 +1835,31 @@ function renderTape(quiet) {
   }).join('');
 }
 
+// ---------- clearing the collected volume ----------
+// The server can forget the 1h / 24h volume it has collected, so Top volume starts over (for everyone using it).
+const clock = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// when the volume was last cleared, if that's under a day ago (after a day the 24h window is whole again)
+const volSince = () => { const t = stream.stats?.volumeClearedAt; return t && Date.now() - t < 86400e3 ? t : null; };
+function renderClearVol() {
+  const t = volSince();
+  $('clearVolBtn').title = 'Forget the 1h and 24h volume the server has collected, so Top volume starts over from now' +
+    (t ? '\nLast cleared at ' + clock(t) + '; volumes count from then' : '');
+}
+$('clearVolBtn').addEventListener('click', async () => {
+  if (!confirm('Clear the volume the server has collected?\n\nTop volume, 1h and 24h volume and the 1h / 24h price changes start over from now, for every dashboard using this server. This can’t be undone.')) return;
+  const b = $('clearVolBtn');
+  b.disabled = true;
+  const server = IMG_BASE || location.origin;
+  try {
+    let r;
+    try { r = await fetch(IMG_BASE + '/api/clear-volume', { method: 'POST' }); }
+    catch { throw new Error('can’t reach the stream server at ' + server + '. Is it running, and is this page allowed to connect to it?'); }
+    if (!r.ok) throw new Error('the server said: ' + (await r.text() || r.status));
+    setT(b, 'Cleared');
+  } catch (e) { setT(b, 'Clear failed'); alert('Volume not cleared: ' + e.message); }
+  setTimeout(() => { b.disabled = false; setT(b, 'Clear volume'); renderClearVol(); }, 2000);
+});
+
 // ---------- controls ----------
 function segment(id, fn) {
   $(id).addEventListener('click', e => {
@@ -1908,6 +1936,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('ageMen
 
 function applyListUi() {
   $('boardLabel').textContent = 'Largest pools on the map';
+  $('clearVolBtn').hidden = state.list !== 'top' && state.list !== 'both';
   $('breakoutSection').hidden = state.list !== 'breakout';
   renderLegend();
 }
