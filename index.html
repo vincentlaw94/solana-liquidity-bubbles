@@ -237,10 +237,28 @@ table.bw a { color: inherit; }
 #tip .tip-flags { margin-top: 6px; color: var(--accent); font-size: 11px; }
 .ctl.check input { margin: 0; accent-color: var(--accent); }
 #listView { position: absolute; inset: 0; display: flex; background: var(--bg); }
-.list-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.list-pane + .list-pane { border-left: 1px solid var(--line); }
-.pane-title { padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg); background: var(--panel);
+.list-pane { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* drag handles between the panes of "Both"; sizes are saved in this browser */
+.pane-split { flex: 0 0 5px; cursor: col-resize; background: var(--line); touch-action: none; position: relative; }
+.pane-split::after { content: ''; position: absolute; inset: 0 -4px; }
+.pane-split:hover, .pane-split.dragging, .pane-split:focus-visible { background: var(--accent); outline: none; }
+#listView.resizing { cursor: col-resize; user-select: none; }
+.pane-title { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--fg); background: var(--panel);
   border-bottom: 1px solid var(--line); box-shadow: inset 0 -2px 0 var(--accent); }
+.pane-toggle { all: unset; box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 12px; cursor: pointer; }
+.pane-toggle:hover { color: var(--accent); }
+.pane-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-toggle svg { width: 12px; height: 12px; flex: none; color: var(--muted); transition: transform .15s; }
+/* a collapsed list in Both keeps only its title: a narrow strip, or one row when the lists stack */
+.list-pane.collapsed { flex: 0 0 auto !important; }
+.list-pane.collapsed .list-scroll { display: none; }
+.list-pane.collapsed .pane-title { flex: 1; box-shadow: none; }
+.list-pane.collapsed .pane-toggle svg { transform: rotate(-90deg); }
+@media (min-width: 1201px) {
+  .list-pane.collapsed .pane-title { border-bottom: 0; border-right: 1px solid var(--line); }
+  .list-pane.collapsed .pane-toggle { writing-mode: vertical-rl; height: 100%; width: auto; padding: 12px 8px; }
+  .list-pane.collapsed .pane-toggle svg { transform: none; }
+}
 #listView .list-scroll { flex: 1; min-height: 0; overflow: auto; }
 #panelBtn[aria-expanded] { border-color: var(--line); }
 #panelBtn:hover { border-color: var(--muted); }
@@ -248,7 +266,9 @@ main.panel-off { grid-template-columns: minmax(0, 1fr); }
 main.panel-off aside { display: none; }
 @media (max-width: 1200px) {
   #listView { flex-direction: column; }
-  .list-pane + .list-pane { border-left: 0; border-top: 1px solid var(--line); }
+  .pane-split { cursor: row-resize; }
+  .pane-split::after { inset: -4px 0; }
+  #listView.resizing { cursor: row-resize; }
 }
 #hiddenBtn { display: inline-flex; align-items: center; gap: 6px; }
 #hiddenBtn svg { width: 14px; height: 14px; color: var(--muted); }
@@ -261,6 +281,15 @@ table.pools th[aria-sort] button { color: var(--fg); }
 table.pools th[aria-sort="descending"] button::after { content: " ↓"; color: var(--accent); }
 table.pools th[aria-sort="ascending"] button::after { content: " ↑"; color: var(--accent); }
 table.pools th.l, table.pools td.l { text-align: left; }
+/* column widths dragged by the viewer: the table then lays out from the header, and long cells are cut short */
+table.pools.sized { table-layout: fixed; min-width: 0; }
+table.pools.sized th button, table.pools.sized td { overflow: hidden; text-overflow: ellipsis; }
+/* inside its own header cell: the next cell is painted over anything sticking out */
+.col-resize { position: absolute; top: 0; right: 0; width: 7px; height: 100%; cursor: col-resize; z-index: 2; touch-action: none; }
+.col-resize::after { content: ''; position: absolute; top: 20%; bottom: 20%; right: 0; width: 2px; border-radius: 1px; background: transparent; }
+table.pools th:hover .col-resize::after { background: var(--line); }
+.col-resize:hover::after, .col-resize.dragging::after { background: var(--accent) !important; top: 0; bottom: 0; }
+#listView.col-resizing { cursor: col-resize; user-select: none; }
 table.pools td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
 table.pools tbody tr { cursor: pointer; transition: background-color .4s; }
 table.pools tbody tr:hover { background: var(--raise); }
@@ -360,6 +389,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     </div>
     <button type="button" class="btn" id="hiddenBtn" hidden></button>
     <button type="button" class="btn" id="colBtn" aria-expanded="false" aria-controls="colPanel" hidden>Columns</button>
+    <button type="button" class="btn" id="clearVolBtn" hidden>Clear volume</button>
     <label class="ctl check" for="genuine" title="Hide pools with rug, wash-trading or honeypot red flags"><input type="checkbox" id="genuine" checked> Genuine only</label>
     <label class="ctl" for="q">Find <input type="search" id="q" placeholder="token or pair" autocomplete="off"></label>
     <button type="button" class="btn" id="panelBtn" aria-controls="sidePanel" aria-expanded="true">Hide panel</button>
@@ -382,14 +412,23 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     </div>
     <div id="listView" hidden>
       <div class="list-pane" id="paneA">
-        <div class="pane-title" hidden></div>
+        <div class="pane-title" hidden><button type="button" class="pane-toggle" aria-expanded="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg><span></span></button></div>
         <div class="list-scroll">
           <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
           <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
         </div>
       </div>
+      <div class="pane-split" data-i="0" role="separator" aria-orientation="vertical" aria-valuemin="10" aria-valuemax="90" tabindex="0" aria-label="Resize lists (double-click to even them out)" hidden></div>
       <div class="list-pane" id="paneB" hidden>
-        <div class="pane-title"></div>
+        <div class="pane-title"><button type="button" class="pane-toggle" aria-expanded="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg><span></span></button></div>
+        <div class="list-scroll">
+          <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
+          <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
+        </div>
+      </div>
+      <div class="pane-split" data-i="1" role="separator" aria-orientation="vertical" aria-valuemin="10" aria-valuemax="90" tabindex="0" aria-label="Resize lists (double-click to even them out)" hidden></div>
+      <div class="list-pane" id="paneC" hidden>
+        <div class="pane-title"><button type="button" class="pane-toggle" aria-expanded="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg><span></span></button></div>
         <div class="list-scroll">
           <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
           <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
@@ -452,7 +491,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <footer id="footStream">
       All data comes from your own server (stream/), which subscribes to Solana program logs and decodes every swap on Pump.fun (including graduated tokens on the Pump AMM),
       Raydium LaunchLab (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags and others). Each ripple is one real swap, sized by its USD value.
-      Top volume ranks by 24h volume, Trending by recent momentum, and Both shows the two lists side by side.
+      Top volume ranks by 24h volume, Trending by recent momentum, and Both shows Trending, Top volume and Breakout side by side (drag the lines between them to resize, click a list's title to collapse or show it). Drag a column's right edge to resize it.
       Breakout ranks coins that pass safety checks (genuine trading, under 20% bundled, no bundler deployer, $3k+ liquidity,
       $5k–$2M market cap, not dumping, not up over 5× this hour) by room to grow, buy pressure, volume pace, traders, pool depth and curve progress.
       It is a screen, not a prediction; its record in the side panel shows how flagged coins actually did.
@@ -465,7 +504,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 
 <script>
 // Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
-const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Trending + Top volume', breakout: 'Breakout' };
+const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Trending + Top volume + Breakout', breakout: 'Breakout' };
 const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
 const DEX_PALETTE = ['#f3b33d', '#5aa9ff', '#c38bff', '#2ed3a3', '#ff8a5c', '#ff6fb1', '#9ee35b', '#4fd6e8'];
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -476,7 +515,7 @@ const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
 const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], ages: {}, ageFavs: null, ageOpen: null, size: 'log', view: 'list', panel: true, sort: { key: 'rank', dir: 1 }, query: '', selected: null, hover: null,
-                lastUpdate: 0, error: null };
+                paneCollapsed: [false, false, false], colWidths: {}, lastUpdate: 0, error: null };
 let nodes = [];
 const byId = new Map();
 const dexColor = new Map();
@@ -535,8 +574,8 @@ function getDexColor(d) {
 const realImage = url => url && /^https?:/.test(url) && !/missing/i.test(url) ? url : null;
 function fromStream(r, i) {
   return {
-    // rankT / rankV: place in Trending / Top volume when both lists are shown
-    id: r.id, rank: i + 1, rankT: r.rankT ?? null, rankV: r.rankV ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
+    // rankT / rankV / rankB: place in Trending / Top volume / Breakout when Both is shown; setup: Breakout's score
+    id: r.id, rank: i + 1, rankT: r.rankT ?? null, rankV: r.rankV ?? null, rankB: r.rankB ?? null, setup: r.setup ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
     vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg: { m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
     buys5: r.buys5, sells5: r.sells5, price: r.price, mcap: r.mcap || 0, flags: r.flags || [],
     created: r.created || 0, born: r.born || 0, firstSeen: r.firstSeen, progress: r.progress, graduated: r.graduated,
@@ -619,7 +658,7 @@ function streamConnect() {
   };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if (m.type === 'stats') { stream.stats = m.stats; renderStatus(); return; }
+    if (m.type === 'stats') { stream.stats = m.stats; renderStatus(); renderClearVol(); return; }
     if (m.type === 'pools') {
       if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
       const rows = applySnapshot(m);
@@ -638,7 +677,7 @@ function streamConnect() {
     } else if (m.type === 'event') pushFeed(m);
     else if (m.type === 'ath') { athCoins = m.coins; renderAth(); }
     else if (m.type === 'breakout') renderBreakout(m.stats);
-    else if (m.type === 'pins') mergePins(m.pins);
+    else if (m.type === 'pins') mergePins(m.pins, m.unpinned);
   };
   ws.onclose = () => {
     const wasOpen = stream.open;
@@ -1208,14 +1247,16 @@ function pinButtonHtml(n) {
     (on ? 'Unpin this coin' : 'Pin to the top and keep tracking it') + '" aria-label="' + esc(label) + '" aria-pressed="' + on + '">' + (on ? ICON_PIN_ON : ICON_PIN) + '</button>';
 }
 // This browser's copy of the pins (saved with the other settings): the server's list, plus any it doesn't have,
-// which are sent back to it. Unpinning removes a coin from both.
+// which are sent back to it. Unpinning removes a coin from both: the server also lists recent unpins, so a copy
+// made before one (in this tab or another) is dropped instead of being sent back.
 const validMint = m => typeof m === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(m);
 const num = v => typeof v === 'number' && isFinite(v) && v > 0 ? v : null;
 const cleanPin = p => p && validMint(p.mint) && num(p.entry) && num(p.at) ?
   { mint: p.mint, sym: String(p.sym || '').slice(0, 40), at: p.at, entry: p.entry, peak: num(p.peak) || p.entry, peakAt: num(p.peakAt) || p.at } : null;
-function mergePins(serverPins) {
+function mergePins(serverPins, unpinned) {
   const fromServer = (serverPins || []).map(cleanPin).filter(Boolean), have = new Set(fromServer.map(p => p.mint));
-  const missing = state.pins.filter(p => !have.has(p.mint));
+  const gone = new Map(Array.isArray(unpinned) ? unpinned : []);
+  const missing = state.pins.filter(p => !have.has(p.mint) && !(p.at <= (gone.get(p.mint) || 0)));
   if (missing.length) streamSend({ type: 'pins', pins: missing });
   const next = fromServer.concat(missing);
   if (JSON.stringify(next) !== JSON.stringify(state.pins)) { state.pins = next; saveSettings(); }
@@ -1322,11 +1363,11 @@ const COLUMNS = {
   traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { setT(td, n.traders5 ? String(n.traders5) : '–'); } },
   score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { setT(td, n.score != null ? n.score.toFixed(1) : '–'); } },
   // Breakout list: setup score (0-100) and the reasons behind it
-  setup: { label: 'Setup', align: 'l', sort: n => state.list === 'breakout' ? n.score ?? -Infinity : -Infinity,
+  setup: { label: 'Setup', align: 'l', sort: n => n.setup ?? -Infinity,
     init: td => { td.innerHTML = '<b></b><span class="why"></span>'; td._b = td.firstChild; td._why = td.lastChild; },
     set: (td, n) => {
-      const on = state.list === 'breakout' && n.score != null;
-      setT(td._b, on ? String(Math.round(n.score)) : '–'); setT(td._why, on ? n.why.join(' · ') : '');
+      const on = n.setup != null;
+      setT(td._b, on ? String(Math.round(n.setup)) : '–'); setT(td._why, on ? n.why.join(' · ') : '');
     } },
   // pinned coins: market cap now against when pinned, and its best since
   sincePin: { label: 'Since pinned', sort: n => pinOf(n) ? mcapOf(n) / n.pin.entry : -Infinity,
@@ -1407,40 +1448,166 @@ function normalizeColumns(saved) {
   return out;
 }
 state.columns = normalizeColumns(null);
-// the Breakout list always shows its own columns, right after the token
+// the Breakout list (and its pane in Both) always shows its own columns, right after the token
 const BREAKOUT_COLUMNS = ['setup', 'sinceFlag'];
 // and "Since pinned" while any coin is pinned
-const shownColumns = () => {
+const shownColumns = pane => {
   const cols = state.columns.filter(c => c.on).map(c => c.key);
-  const extra = state.list === 'breakout' ? BREAKOUT_COLUMNS.filter(k => !cols.includes(k)) : [];
+  const extra = pane.breakout ? BREAKOUT_COLUMNS.filter(k => !cols.includes(k)) : [];
   if (pinsShown() && !cols.includes('sincePin') && nodes.some(n => n.pin)) extra.unshift('sincePin');
   cols.splice(cols.indexOf('token') + 1, 0, ...extra);
   return cols;
 };
 
-// One table per list. With "Both", pane A shows the Trending coins and pane B the Top volume coins,
-// each ranked by its own list; otherwise pane A shows the whole list and pane B is hidden.
-const panes = ['paneA', 'paneB'].map(id => {
+// One table per list. With "Both", pane A shows the Trending coins, pane B the Top volume coins and pane C the
+// Breakout coins, each ranked by its own list; otherwise pane A shows the whole list and B and C are hidden.
+const panes = ['paneA', 'paneB', 'paneC'].map(id => {
   const el = $(id);
-  return { el, title: el.querySelector('.pane-title'), head: el.querySelector('thead tr'), body: el.querySelector('tbody'),
-    empty: el.querySelector('.list-empty'), rows: new Map(), rank: n => n.rank, include: () => true };
+  return { el, title: el.querySelector('.pane-title'), label: el.querySelector('.pane-toggle span'), toggle: el.querySelector('.pane-toggle'), head: el.querySelector('thead tr'), body: el.querySelector('tbody'),
+    empty: el.querySelector('.list-empty'), rows: new Map(), rank: n => n.rank, include: () => true, breakout: false };
 });
+const splits = [...document.querySelectorAll('.pane-split')];
 function setupPanes() {
-  const both = state.list === 'both', [a, b] = panes;
-  b.el.hidden = !both; a.title.hidden = !both;
+  const both = state.list === 'both', [a, b, c] = panes;
+  b.el.hidden = c.el.hidden = !both; a.title.hidden = !both;
   a.rank = both ? n => n.rankT : n => n.rank;
   a.include = both ? n => n.rankT != null : () => true;
+  a.breakout = state.list === 'breakout';
   b.rank = n => n.rankV; b.include = n => n.rankV != null;
-  setT(a.title, 'Trending'); setT(b.title, 'Top volume');
-  if (!both) { for (const tr of b.rows.values()) tr.remove(); b.rows.clear(); }
+  c.rank = n => n.rankB; c.include = n => n.rankB != null; c.breakout = true;
+  setT(a.label, 'Trending'); setT(b.label, 'Top volume'); setT(c.label, 'Breakout');
+  if (!both) for (const p of [b, c]) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); }
+  applyPaneSizes();
 }
+// Pane sizes in Both: each pane's share of the width (or height, when the panes stack), saved with the other settings
+const PANE_MIN = 0.1;
+const evenPanes = () => panes.map(() => 1 / panes.length);
+function cleanPaneSizes(v) {
+  if (!Array.isArray(v) || v.length !== panes.length || !v.every(x => typeof x === 'number' && isFinite(x) && x > 0)) return null;
+  const sum = v.reduce((t, x) => t + x, 0);
+  return v.map(x => Math.max(PANE_MIN, x / sum));
+}
+// Lists collapsed in Both (by clicking their title), saved with the other settings
+const collapsed = i => state.list === 'both' && !!state.paneCollapsed[i];
+// the two open lists a handle sits between, skipping collapsed ones; null when there is no open list on one side
+function splitPair(i) {
+  let l = i, r = i + 1;
+  while (l >= 0 && collapsed(l)) l--;
+  while (r < panes.length && collapsed(r)) r++;
+  return l >= 0 && r < panes.length ? [l, r] : null;
+}
+function applyPaneSizes() {
+  const both = state.list === 'both', sizes = state.paneSizes || evenPanes();
+  panes.forEach((p, i) => {
+    const shut = collapsed(i);
+    // shares scaled up: flex-grow values adding up to under 1 leave the rest of the space empty (a collapsed list's share)
+    p.el.style.flexGrow = both ? String(sizes[i] * 100) : '';
+    p.el.classList.toggle('collapsed', shut);
+    p.toggle.setAttribute('aria-expanded', shut ? 'false' : 'true');
+    p.toggle.title = (shut ? 'Show ' : 'Collapse ') + p.label.textContent;
+  });
+  // one handle per pair of open lists: with the middle one collapsed, the first handle resizes the outer two
+  const seen = new Set();
+  splits.forEach((sp, i) => {
+    const pair = both && splitPair(i), key = pair && pair.join();
+    sp.hidden = !pair || seen.has(key);
+    if (pair) seen.add(key);
+    sp.setAttribute('aria-valuenow', String(Math.round(sizes.slice(0, i + 1).reduce((t, x) => t + x, 0) * 100)));
+  });
+}
+function togglePane(i) {
+  state.paneCollapsed[i] = !state.paneCollapsed[i];
+  applyPaneSizes(); saveSettings(); renderList();
+}
+panes.forEach((p, i) => p.toggle.addEventListener('click', () => { if (state.list === 'both') togglePane(i); }));
+// the panes sit side by side, or stack on narrow screens
+function stackedPanes() {
+  const stacked = getComputedStyle($('listView')).flexDirection === 'column';
+  for (const sp of splits) sp.setAttribute('aria-orientation', stacked ? 'horizontal' : 'vertical');
+  return stacked;
+}
+// move handle i by `frac` of the open lists' total size, keeping both lists it sits between above the minimum
+function movePaneSplit(i, frac) {
+  const pair = splitPair(i); if (!pair) return;
+  const [l, r] = pair, s = (state.paneSizes || evenPanes()).slice();
+  const open = s.reduce((t, x, j) => t + (collapsed(j) ? 0 : x), 0), both = s[l] + s[r];
+  s[l] = Math.min(both - PANE_MIN, Math.max(PANE_MIN, s[l] + frac * open)); s[r] = both - s[l];
+  state.paneSizes = s; applyPaneSizes();
+}
+splits.forEach((sp, i) => {
+  sp.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const stacked = stackedPanes(), view = $('listView');
+    // what each pixel is worth: the open lists' total size, without the handles and collapsed strips
+    const total = panes.reduce((t, p, j) => t + (collapsed(j) ? 0 : stacked ? p.el.offsetHeight : p.el.offsetWidth), 0) || 1;
+    let last = stacked ? e.clientY : e.clientX;
+    sp.setPointerCapture(e.pointerId); sp.classList.add('dragging'); view.classList.add('resizing');
+    const move = ev => { const at = stacked ? ev.clientY : ev.clientX; movePaneSplit(i, (at - last) / total); last = at; };
+    const up = () => {
+      sp.removeEventListener('pointermove', move); sp.removeEventListener('pointerup', up); sp.removeEventListener('pointercancel', up);
+      sp.classList.remove('dragging'); view.classList.remove('resizing'); saveSettings();
+    };
+    sp.addEventListener('pointermove', move); sp.addEventListener('pointerup', up); sp.addEventListener('pointercancel', up);
+  });
+  sp.addEventListener('keydown', e => {
+    const keys = stackedPanes() ? { ArrowUp: -1, ArrowDown: 1 } : { ArrowLeft: -1, ArrowRight: 1 };
+    if (!keys[e.key]) return;
+    e.preventDefault(); movePaneSplit(i, keys[e.key] * 0.02); saveSettings();
+  });
+  // double-click: even the panes out again
+  sp.addEventListener('dblclick', () => { state.paneSizes = null; applyPaneSizes(); saveSettings(); });
+});
 function renderHead() {
-  const html = shownColumns().map(k => {
+  for (const p of panes) p.head.innerHTML = shownColumns(p).map(k => {
     const c = COLUMNS[k];
     const sort = state.sort.key === k ? ' aria-sort="' + (state.sort.dir > 0 ? 'ascending' : 'descending') + '"' : '';
-    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.label) + '</button></th>';
+    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.label) + '</button>' +
+      '<span class="col-resize" title="Drag to resize; double-click to fit all columns again" aria-hidden="true"></span></th>';
   }).join('');
-  for (const p of panes) p.head.innerHTML = html;
+  for (const p of panes) applyColWidths(p);
+}
+// Column widths the viewer dragged, by column (the same in every list), saved with the other settings. Once any
+// shown column has one, the table lays out from those widths; columns without one get a default.
+const COL_MIN = 36, COL_DEFAULT = 100;
+function applyColWidths(p) {
+  const ths = [...p.head.children], table = p.head.closest('table');
+  const sized = ths.some(th => state.colWidths[th.dataset.k]);
+  let total = 0;
+  for (const th of ths) {
+    const w = sized ? state.colWidths[th.dataset.k] || COL_DEFAULT : 0;
+    total += w;
+    th.style.width = w ? w + 'px' : '';
+  }
+  table.classList.toggle('sized', sized);
+  table.style.width = sized ? total + 'px' : '';
+}
+for (const p of panes) {
+  p.head.addEventListener('pointerdown', e => {
+    const grip = e.target.closest('.col-resize');
+    if (!grip || e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const th = grip.closest('th'), k = th.dataset.k, view = $('listView');
+    // first resize: keep every column in every list where it is now, so only the dragged one moves
+    const open = panes.filter((q, i) => !q.el.hidden && !collapsed(i));
+    for (const q of open) for (const h of q.head.children) if (!state.colWidths[h.dataset.k]) state.colWidths[h.dataset.k] = Math.max(COL_MIN, Math.round(h.offsetWidth));
+    const start = e.clientX, from = state.colWidths[k];
+    grip.setPointerCapture(e.pointerId); grip.classList.add('dragging'); view.classList.add('col-resizing');
+    for (const q of open) applyColWidths(q);
+    const move = ev => { state.colWidths[k] = Math.max(COL_MIN, Math.round(from + ev.clientX - start)); applyColWidths(p); };
+    const up = () => {
+      grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up);
+      grip.classList.remove('dragging'); view.classList.remove('col-resizing');
+      for (const q of panes) applyColWidths(q);
+      saveSettings();
+    };
+    grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
+  });
+  // double-click a grip: every column fits its content again
+  p.head.addEventListener('dblclick', e => {
+    if (!e.target.closest('.col-resize')) return;
+    state.colWidths = {}; for (const q of panes) applyColWidths(q); saveSettings();
+  });
 }
 function rebuildList() {
   for (const p of panes) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); }
@@ -1480,10 +1647,10 @@ function updateRow(tr, n, cols, ctx) {
 let colsKey = '';
 function renderList() {
   if (state.view !== 'list') return;
-  const cols = shownColumns(), now = performance.now();
+  const now = performance.now(), cols = panes.map(shownColumns), key = cols.map(c => c.join()).join('|');
   // the column set changes on its own too (the first pin adds "Since pinned"): rebuild the rows when it does
-  if (cols.join() !== colsKey) { colsKey = cols.join(); for (const p of panes) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); } renderHead(); }
-  for (const p of panes) if (!p.el.hidden) renderPane(p, cols, now);
+  if (key !== colsKey) { colsKey = key; for (const p of panes) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); } renderHead(); }
+  panes.forEach((p, i) => { if (!p.el.hidden && !collapsed(i)) renderPane(p, cols[i], now); });
 }
 function renderPane(p, cols, now) {
   const { key, dir } = state.sort;
@@ -1513,7 +1680,7 @@ function renderPane(p, cols, now) {
   if (p.empty.hidden !== empty) p.empty.hidden = empty;
 }
 for (const p of panes) p.head.addEventListener('click', e => {
-  const th = e.target.closest('th'); if (!th) return;
+  const th = e.target.closest('th'); if (!th || e.target.closest('.col-resize')) return;
   const k = th.dataset.k;
   state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (COLUMNS[k].align === 'l' || k === 'rank' ? 1 : -1) };
   renderHead(); renderList(); saveSettings();
@@ -1546,7 +1713,7 @@ function openColPanel(open) {
 }
 $('colBtn').addEventListener('click', () => openColPanel($('colPanel').hidden));
 $('colDone').addEventListener('click', () => { openColPanel(false); $('colBtn').focus(); });
-$('colReset').addEventListener('click', () => { state.columns = normalizeColumns(null); columnsChanged(); });
+$('colReset').addEventListener('click', () => { state.columns = normalizeColumns(null); state.colWidths = {}; columnsChanged(); });
 $('colList').addEventListener('change', e => {
   const k = e.target.closest('li')?.dataset.k, c = state.columns.find(c => c.key === k);
   if (c && !COLUMNS[k].locked) { c.on = e.target.checked; rebuildList(); saveSettings(); }
@@ -1590,7 +1757,7 @@ function saveSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       view: state.view, list: state.list, panel: state.panel, colorBy: state.colorBy, size: state.size,
       group: state.group, genuine: state.genuine, hidden: state.hidden, pins: state.pins, sort: state.sort, columns: state.columns,
-      ages: state.ages, ageFavs: state.ageFavs, ageOpen: state.ageOpen,
+      ages: state.ages, ageFavs: state.ageFavs, ageOpen: state.ageOpen, paneSizes: state.paneSizes, paneCollapsed: state.paneCollapsed, colWidths: state.colWidths,
     }));
   } catch {}
 }
@@ -1617,6 +1784,11 @@ function restoreSettings() {
   if (Array.isArray(s.pins)) state.pins = s.pins.map(cleanPin).filter(Boolean).slice(0, 200);
   if (s.sort && COLUMNS[s.sort.key] && (s.sort.dir === 1 || s.sort.dir === -1)) state.sort = { key: s.sort.key, dir: s.sort.dir };
   state.columns = normalizeColumns(s.columns);
+  state.paneSizes = cleanPaneSizes(s.paneSizes);
+  if (s.colWidths && typeof s.colWidths === 'object') for (const [k, w] of Object.entries(s.colWidths)) {
+    if (COLUMNS[k] && typeof w === 'number' && w >= COL_MIN && w <= 2000) state.colWidths[k] = Math.round(w);
+  }
+  if (Array.isArray(s.paneCollapsed)) state.paneCollapsed = panes.map((_, i) => s.paneCollapsed[i] === true);
 }
 
 // ---------- Breakout record ----------
@@ -1700,7 +1872,7 @@ function renderPanels() {
   for (const n of vis) { liq += n.liq; vol += n.vol24; vol5 += n.vol5; b += n.buys5; s += n.sells5; }
   setT($('setLabel'), LISTS[state.list] + ' · ' + vis.length + ' on map');
   setT($('sLiq'), usd(liq));
-  setT($('sVolLabel'), '24h volume');
+  setT($('sVolLabel'), volSince() ? 'Volume since ' + clock(volSince()) : '24h volume');
   setT($('sVol'), usd(vol));
   setT($('sVol5'), usd(vol5));
   setT($('sTx5'), (b + s).toLocaleString());
@@ -1832,6 +2004,31 @@ function renderTape(quiet) {
   }).join('');
 }
 
+// ---------- clearing the collected volume ----------
+// The server can forget the 1h / 24h volume it has collected, so Top volume starts over (for everyone using it).
+const clock = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// when the volume was last cleared, if that's under a day ago (after a day the 24h window is whole again)
+const volSince = () => { const t = stream.stats?.volumeClearedAt; return t && Date.now() - t < 86400e3 ? t : null; };
+function renderClearVol() {
+  const t = volSince();
+  $('clearVolBtn').title = 'Forget the 1h and 24h volume the server has collected, so Top volume starts over from now' +
+    (t ? '\nLast cleared at ' + clock(t) + '; volumes count from then' : '');
+}
+$('clearVolBtn').addEventListener('click', async () => {
+  if (!confirm('Clear the volume the server has collected?\n\nTop volume, 1h and 24h volume and the 1h / 24h price changes start over from now, for every dashboard using this server. This can’t be undone.')) return;
+  const b = $('clearVolBtn');
+  b.disabled = true;
+  const server = IMG_BASE || location.origin;
+  try {
+    let r;
+    try { r = await fetch(IMG_BASE + '/api/clear-volume', { method: 'POST' }); }
+    catch { throw new Error('can’t reach the stream server at ' + server + '. Is it running, and is this page allowed to connect to it?'); }
+    if (!r.ok) throw new Error('the server said: ' + (await r.text() || r.status));
+    setT(b, 'Cleared');
+  } catch (e) { setT(b, 'Clear failed'); alert('Volume not cleared: ' + e.message); }
+  setTimeout(() => { b.disabled = false; setT(b, 'Clear volume'); renderClearVol(); }, 2000);
+});
+
 // ---------- controls ----------
 function segment(id, fn) {
   $(id).addEventListener('click', e => {
@@ -1908,7 +2105,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('ageMen
 
 function applyListUi() {
   $('boardLabel').textContent = 'Largest pools on the map';
-  $('breakoutSection').hidden = state.list !== 'breakout';
+  $('clearVolBtn').hidden = state.list !== 'top' && state.list !== 'both';
+  $('breakoutSection').hidden = state.list !== 'breakout' && state.list !== 'both';
   renderLegend();
 }
 segment('srcSeg', v => {

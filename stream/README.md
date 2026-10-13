@@ -126,9 +126,9 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
-  - `both`: the union of the two (up to `limit` each); every row carries `rankT` and/or `rankV`, its place in
-    Trending and in Top volume
-  - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` and `why`,
+  - `both`: the union of Trending, Top volume and Breakout (up to `limit` each); every row carries `rankT`, `rankV`
+    and/or `rankB`, its place in each; Breakout coins also carry `setup` (their setup score) and `why`
+  - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` (also as `setup`) and `why`,
     and pinned coins are added to it
 - `GET /api/bundle?mint=<mint>`: a launch's bundle report: status, shares of supply, every launch-window wallet with
   its role, what it bought, sold and still holds, its funding, the groups funded together, and the bundles found.
@@ -140,6 +140,9 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/ath`: the ATH watch (see below): every coin that reached the Top volume top 10, its current top-10 coins first
 - `GET /api/breakout?limit=1000`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX, `since`,
   and the same for the last day under `day`) and the coins it flagged, newest first, with their market cap then (`entry`), `peak` and `hitAt`
+- `POST /api/clear-volume`: forget the 1h and 24h volume collected so far, so Top volume starts over (the 5-minute window
+  is kept; 1h / 24h price changes restart too, and Trending's pace counts from the clear). Refused from other websites'
+  pages; `/api/stats` → `volumeClearedAt` says when it last ran. The dashboard's Clear volume button (Top volume and Both) calls it
 - `GET /api/pins`: pinned coins with their entry, peak, current market cap and `dead` reasons
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a

@@ -4,6 +4,10 @@
 //
 // Dead means any of: liquidity pulled or the curve sold out, down 80% from its peak since pinned, no swaps for
 // 30 minutes, or no pool seen for 5 minutes. A coin that trades back above those lines comes back to life.
+//
+// Browsers keep a copy of the pins and send back any the server lacks (a lost file, another server). So that an
+// unpinned coin isn't sent back by a browser that hasn't heard yet, unpins are remembered: a saved pin made before
+// its coin was unpinned is refused, and browsers are told to drop it.
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 
@@ -12,18 +16,21 @@ export const DEAD = { drawdown: 0.8, quietMs: 30 * 60e3, goneMs: 5 * 60e3, rug: 
 export function createPins({ file = null, log = () => {}, max = 200 } = {}) {
   const pins = new Map();   // mint -> pin
   const byPool = new Map(); // pool id -> mint
+  const unpinned = new Map(); // mint -> when it was last unpinned (the newest 1000)
   let dirty = false;
 
   if (file) {
     try {
-      for (const p of JSON.parse(readFileSync(file, 'utf8')).pins || []) if (p?.mint && p.entry > 0) { pins.set(p.mint, p); if (p.pool) byPool.set(p.pool, p.mint); }
+      const j = JSON.parse(readFileSync(file, 'utf8'));
+      for (const p of j.pins || []) if (p?.mint && p.entry > 0) { pins.set(p.mint, p); if (p.pool) byPool.set(p.pool, p.mint); }
+      for (const [mint, at] of j.unpinned || []) if (typeof mint === 'string' && at > 0 && !pins.has(mint)) unpinned.set(mint, at);
     } catch (e) { if (e.code !== 'ENOENT') log('pins not loaded: ' + e.message); }
   }
   function save() {
     if (!file || !dirty) return;
     try {
       mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file + '.tmp', JSON.stringify({ at: Date.now(), pins: [...pins.values()] }));
+      writeFileSync(file + '.tmp', JSON.stringify({ at: Date.now(), pins: [...pins.values()], unpinned: [...unpinned] }));
       renameSync(file + '.tmp', file);
       dirty = false;
     } catch (e) { log('pins not saved: ' + e.message); }
@@ -53,6 +60,7 @@ export function createPins({ file = null, log = () => {}, max = 200 } = {}) {
         pinnedAt: now, entry: row.mcap, mcap: row.mcap, at: now, peak: row.mcap, peakAt: now, liq: row.liq, lastTs: row.lastTs || now, seenAt: now,
         deadAt: null, dead: null });
       byPool.set(row.id, row.mint);
+      unpinned.delete(row.mint);
       dirty = true; save();
       return true;
     },
@@ -61,6 +69,7 @@ export function createPins({ file = null, log = () => {}, max = 200 } = {}) {
     adopt(saved, row, now = Date.now()) {
       const ok = v => typeof v === 'number' && isFinite(v) && v > 0;
       if (!saved || typeof saved.mint !== 'string' || pins.has(saved.mint) || pins.size >= max || !ok(saved.entry) || !ok(saved.at)) return false;
+      if (saved.at <= (unpinned.get(saved.mint) || 0)) return false; // unpinned since that browser saved it
       const mcap = ok(row?.mcap) ? row.mcap : saved.entry, peak = Math.max(ok(saved.peak) ? saved.peak : saved.entry, mcap);
       pins.set(saved.mint, { mint: saved.mint, sym: row?.sym || String(saved.sym || '').slice(0, 40), name: row?.name || '', icon: row?.icon || null,
         venue: row?.venue || null, quote: row?.quote || 'SOL', pool: row?.id || null, pinnedAt: Math.min(saved.at, now), entry: saved.entry, mcap, at: now,
@@ -69,8 +78,10 @@ export function createPins({ file = null, log = () => {}, max = 200 } = {}) {
       dirty = true;
       return true;
     },
-    unpin(mint) {
+    unpin(mint, now = Date.now()) {
       if (!pins.delete(mint)) return false;
+      unpinned.delete(mint); unpinned.set(mint, now);
+      if (unpinned.size > 1000) unpinned.delete(unpinned.keys().next().value);
       for (const [id, m] of byPool) if (m === mint) byPool.delete(id);
       dirty = true; save();
       return true;
@@ -124,6 +135,8 @@ export function createPins({ file = null, log = () => {}, max = 200 } = {}) {
     list: () => [...pins.values()],
     // what a browser keeps in its storage
     saved: () => [...pins.values()].map(p => ({ mint: p.mint, sym: p.sym, at: p.pinnedAt, entry: p.entry, peak: p.peak, peakAt: p.peakAt })),
+    // coins unpinned in the last day, [mint, when]: browsers drop their copies of pins made before then
+    unpinned: (now = Date.now()) => [...unpinned].filter(([, at]) => at > now - 24 * 3600e3),
     save() { dirty = true; save(); },
     flush: save,
   };

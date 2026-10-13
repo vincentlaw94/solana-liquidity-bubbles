@@ -136,6 +136,7 @@ const snapshot = process.env.SNAPSHOT !== '0' ? createSnapshot({ file: path.join
 const snap = snapshot?.load();
 if (snap) {
   const pools = market.restore(snap.pools), launches = launchBundles.restore(snap.launches);
+  market.volClearedAt = snap.volClearedAt || null;
   athWatch.restore(snap.ath);
   breakout.restore(snap.breakout); // snapshots from before the record had its own file
   meta.restore(snap.meta);
@@ -148,7 +149,7 @@ function saveSnapshot() {
   if (!snapshot) return;
   const mints = [];
   for (const p of market.pools.values()) if (p.ready) mints.push(p.mint, p.quoteMint);
-  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump() });
+  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump(), volClearedAt: market.volClearedAt || null });
 }
 setInterval(saveSnapshot, 60e3).unref();
 // Ctrl+C, a closed terminal window, or a kill: save, then exit (the wallet DB, funding cache and Helius usage
@@ -276,14 +277,15 @@ setInterval(async () => {
 // Momentum score for "Trending": recent volume, how far the last 5 minutes beat the pool's own
 // 5-minute average over the tracked hour, buy pressure, breadth of traders, and price direction.
 function trendScore(r, now) {
-  const minutes = Math.min(60, Math.max(5, (now - r.firstSeen) / 60e3));
+  const minutes = Math.min(60, Math.max(5, (now - (r.volSince ?? r.firstSeen)) / 60e3));
   const avg5 = r.vol60 / (minutes / 5);
   const pace = avg5 > 0 ? r.vol5 / avg5 : 1;
   const buyShare = r.buys5 / Math.max(1, r.buys5 + r.sells5);
   return Math.log10(1 + r.vol5) * (1 + Math.min(3, pace)) * (0.6 + buyShare) * (1 + Math.min(1, r.traders5 / 40)) * (1 + Math.max(0, Math.min(1, r.chg5 / 50)));
 }
-// "both" is the union of Trending and Top volume, each coin tagged with its place in each (rankT, rankV);
-// "breakout" ranks setups by lib/breakout.js's score, and only coins passing its safety gates
+// "both" is the union of Trending, Top volume and Breakout, each coin tagged with its place in each (rankT, rankV,
+// rankB; Breakout coins also carry their setup score as `setup`, and why); "breakout" ranks setups by
+// lib/breakout.js's score, and only coins passing its safety gates
 const LISTS = ['trending', 'top', 'both', 'breakout'];
 const rankTop = (eligible, limit) => eligible.slice().sort((a, b) => b.vol24 - a.vol24 || b.vol5 - a.vol5).slice(0, limit);
 function rankTrending(eligible, limit, now) {
@@ -305,6 +307,11 @@ function pick(rows, cfg) {
   rankTop(eligible, cfg.limit).forEach((r, i) => {
     const o = out.get(r.id);
     if (o) o.rankV = i + 1; else out.set(r.id, { ...r, rankV: i + 1 });
+  });
+  rankBreakout(eligible, cfg.limit, now).forEach((r, i) => {
+    const o = out.get(r.id);
+    // `score` stays the trend score: Breakout's own score travels as `setup`
+    if (o) Object.assign(o, { rankB: i + 1, setup: r.setup, why: r.why }); else out.set(r.id, { ...r, score: null, rankB: i + 1 });
   });
   return [...out.values()];
 }
@@ -333,6 +340,7 @@ function stats() {
       ? { type: 'laserstream', endpoint: feed.chain.endpoint, commitment: LASER_COMMITMENT, lastSlot: feed.chain.lastSlot, transactions: feed.chain.received }
       : { type: 'rpc-websocket', endpoint: RPC_WS.replace(/api-key=[^&]+/, 'api-key=***'), note: feed.note,
           laserstreamCheckedAt: feed.checkedAt, nextLaserstreamCheck: LASER_KEY && feed.checkedAt ? feed.checkedAt + LASER_RECHECK_MS : null },
+    volumeClearedAt: market.volClearedAt || null, // Top volume counts from here when it was cleared under a day ago
     tradesPerSec: +tps.toFixed(1), perProgram: rate.perSec, pools: market.pools.size, trades: market.counts.trades,
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
@@ -403,7 +411,7 @@ let latestRows = [];
 // its live fields are re-sent only when one of them changed since that client last received them.
 const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer', 'links'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV',
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV', 'rankB', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
   'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
@@ -469,7 +477,7 @@ setInterval(() => {
   const b = JSON.stringify({ type: 'breakout', stats: breakout.stats() });
   if (b !== breakoutSent) { breakoutSent = b; for (const c of clients) sendTo(c, 'breakout', b); }
   // pins as browsers save them, so each keeps a copy
-  const p = JSON.stringify({ type: 'pins', pins: pins.saved() });
+  const p = JSON.stringify({ type: 'pins', pins: pins.saved(), unpinned: pins.unpinned() });
   if (p !== pinsSent) { pinsSent = p; for (const c of clients) sendTo(c, 'pins', p); }
 }, 2000);
 setInterval(() => {
@@ -608,6 +616,21 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/pins') {
     // pinned coins: market cap when pinned, peak since, now, and why each looks dead (if it does)
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), pins: pins.list() }));
+  } else if (url.pathname === '/api/clear-volume') {
+    // start Top volume over: forget the 1h / 24h volume collected so far. POST only, and only from this machine's
+    // own pages (any website can send a request to localhost): the dashboard served from it, or index.html opened
+    // from disk (a file:// page sends Origin "null")
+    const origin = req.headers.origin;
+    if (req.method !== 'POST') res.writeHead(405, { allow: 'POST' }).end('POST only');
+    else if (origin && origin !== 'null' && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) res.writeHead(403).end('not allowed from ' + origin);
+    else {
+      const pools = market.clearVolume();
+      latestRows = market.rows(); // the next ranking tick reads the cleared buckets
+      saveSnapshot();
+      log(`volume cleared on ${pools} pools: Top volume starts over`);
+      broadcast({ type: 'stats', stats: stats() });
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, pools, at: market.volClearedAt }));
+    }
   } else if (url.pathname === '/api/health') {
     // per program: pools seen, resolved (mints + decimals known), priced (quote token has a USD price)
     const h = {};
@@ -639,7 +662,7 @@ wss.on('connection', ws => {
   send({ type: 'stats', stats: stats() });
   send({ type: 'ath', coins: athWatch.list() });
   send({ type: 'breakout', stats: breakout.stats() });
-  send({ type: 'pins', pins: pins.saved() });
+  send({ type: 'pins', pins: pins.saved(), unpinned: pins.unpinned() });
   pushPools(c, true);
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
@@ -661,7 +684,7 @@ wss.on('connection', ws => {
       }
       if (n) { pins.save(); log('restored ' + n + ' pin(s) from a browser'); }
     } else if (m.type === 'unpin' && typeof m.mint === 'string') {
-      pins.unpin(m.mint);
+      if (pins.unpin(m.mint)) log('unpinned ' + m.mint);
     } else if (m.type === 'select') {
       c.selected = typeof m.id === 'string' ? m.id : null;
       if (c.selected) send({ type: 'tape', id: c.selected, trades: market.tape(c.selected) });

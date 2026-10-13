@@ -305,6 +305,8 @@ export class Market {
         chg60: chg(p.price, first60),
         chg24: chg(p.price, first24),
         progress: p.progress, graduated: p.graduated, firstSeen: p.firstSeen, created: p.created || null, lastTs: p.lastTs,
+        // start of this pool's 1h/24h volume: when it was first seen, or the last time the volume was cleared
+        volSince: Math.max(p.firstSeen, this.volClearedAt || 0),
         // coin age: when the token first got a pool (Jupiter), else the launch this server saw on-chain
         born: tok.born || (!flip && p.created) || null,
         // ATH: highest market cap this server has seen, at today's quote price (flipped pools: the token is the quote)
@@ -408,6 +410,18 @@ export class Market {
       n++;
     }
     return n;
+  }
+
+  // Forget the 1h and 24h volume collected so far (Top volume starts over); the 5-minute window is kept. The
+  // 1h / 24h price changes are measured from the same buckets, so they restart too.
+  clearVolume(now = Date.now()) {
+    let pools = 0;
+    for (const p of this.pools.values()) {
+      if (p.mins.length || p.hours.length) pools++;
+      p.mins = []; p.hours = []; p.vol60 = 0; p.vol24 = 0;
+    }
+    this.volClearedAt = now;
+    return pools;
   }
 
   drain() {

@@ -90,3 +90,19 @@ test('a pin saved in a browser is taken back with its original entry, time and p
   // junk from storage is refused
   assert.equal(q.adopt({ mint: 'Y', entry: 'x', at: T0 }, undefined, T0), false);
 });
+
+test('a browser that still has an unpinned coin cannot bring it back, even after a restart', () => {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), 'pins-')), 'pins.json');
+  const p = createPins({ file });
+  p.pin(row(), T0);
+  const [stale] = p.saved(); // what another tab (or a list update in flight) still holds
+  assert.ok(p.unpin('A', T0 + 5000));
+  assert.equal(p.adopt(stale, row(), T0 + 6000), false);
+  assert.deepEqual(p.unpinned(T0 + 6000), [['A', T0 + 5000]]); // sent to browsers so they drop their copy
+  p.flush();
+  const p2 = createPins({ file });
+  assert.equal(p2.adopt(stale, row(), T0 + 7000), false);
+  // pinning it again later works, and clears the unpin
+  assert.ok(p2.pin(row(), T0 + 8000));
+  assert.deepEqual(p2.unpinned(T0 + 8000), []);
+});
