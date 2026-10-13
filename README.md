@@ -3,7 +3,7 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): Trending, Top volume, or both side by side, with market cap, age, liquidity, price
+- **List view** (default): Trending, Top volume, Breakout, or Both (all three side by side, in panes you can resize by dragging the lines between them or collapse by clicking their title), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.

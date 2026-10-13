@@ -126,9 +126,9 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
-  - `both`: the union of the two (up to `limit` each); every row carries `rankT` and/or `rankV`, its place in
-    Trending and in Top volume
-  - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` and `why`,
+  - `both`: the union of Trending, Top volume and Breakout (up to `limit` each); every row carries `rankT`, `rankV`
+    and/or `rankB`, its place in each; Breakout coins also carry `setup` (their setup score) and `why`
+  - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` (also as `setup`) and `why`,
     and pinned coins are added to it
 - `GET /api/bundle?mint=<mint>`: a launch's bundle report: status, shares of supply, every launch-window wallet with
   its role, what it bought, sold and still holds, its funding, the groups funded together, and the bundles found.

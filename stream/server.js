@@ -283,8 +283,9 @@ function trendScore(r, now) {
   const buyShare = r.buys5 / Math.max(1, r.buys5 + r.sells5);
   return Math.log10(1 + r.vol5) * (1 + Math.min(3, pace)) * (0.6 + buyShare) * (1 + Math.min(1, r.traders5 / 40)) * (1 + Math.max(0, Math.min(1, r.chg5 / 50)));
 }
-// "both" is the union of Trending and Top volume, each coin tagged with its place in each (rankT, rankV);
-// "breakout" ranks setups by lib/breakout.js's score, and only coins passing its safety gates
+// "both" is the union of Trending, Top volume and Breakout, each coin tagged with its place in each (rankT, rankV,
+// rankB; Breakout coins also carry their setup score as `setup`, and why); "breakout" ranks setups by
+// lib/breakout.js's score, and only coins passing its safety gates
 const LISTS = ['trending', 'top', 'both', 'breakout'];
 const rankTop = (eligible, limit) => eligible.slice().sort((a, b) => b.vol24 - a.vol24 || b.vol5 - a.vol5).slice(0, limit);
 function rankTrending(eligible, limit, now) {
@@ -306,6 +307,11 @@ function pick(rows, cfg) {
   rankTop(eligible, cfg.limit).forEach((r, i) => {
     const o = out.get(r.id);
     if (o) o.rankV = i + 1; else out.set(r.id, { ...r, rankV: i + 1 });
+  });
+  rankBreakout(eligible, cfg.limit, now).forEach((r, i) => {
+    const o = out.get(r.id);
+    // `score` stays the trend score: Breakout's own score travels as `setup`
+    if (o) Object.assign(o, { rankB: i + 1, setup: r.setup, why: r.why }); else out.set(r.id, { ...r, score: null, rankB: i + 1 });
   });
   return [...out.values()];
 }
@@ -405,7 +411,7 @@ let latestRows = [];
 // its live fields are re-sent only when one of them changed since that client last received them.
 const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer', 'links'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV',
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV', 'rankB', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
   'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes

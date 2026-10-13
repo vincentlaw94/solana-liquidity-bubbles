@@ -70,7 +70,7 @@ export function rankBreakout(eligible, limit, now = Date.now()) {
   const out = [];
   for (const r of eligible) {
     const b = breakoutScore(r, now);
-    if (b) out.push({ ...r, score: b.score, why: b.why });
+    if (b) out.push({ ...r, score: b.score, setup: b.score, why: b.why });
   }
   return out.sort((a, b) => b.score - a.score).slice(0, limit);
 }
