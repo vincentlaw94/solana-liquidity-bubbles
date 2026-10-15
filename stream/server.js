@@ -11,7 +11,8 @@
 //      BUNDLER_REFRESH=0 to use the hardcoded list without refreshing it on start,
 //      BUNDLE_DETECT=0 to turn off this server's own launch-bundle detector (Jito + block-order fallback),
 //      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start,
-//      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz
+//      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz,
+//      HOLDERS=0 to skip the top-holder scan (lib/holders.js)
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -31,6 +32,7 @@ import { Market } from './lib/market.js';
 import { createAthWatch } from './lib/ath.js';
 import { rankBreakout, createBreakoutTracker } from './lib/breakout.js';
 import { createPins } from './lib/pins.js';
+import { createHolderScan } from './lib/holders.js';
 
 const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
 const LASER_ENDPOINT = process.env.LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com';
@@ -130,6 +132,9 @@ const breakout = createBreakoutTracker({ file: path.join(DATA_DIR, 'breakout-rec
 // coins the viewer pinned: followed by mint until unpinned, with their peak since pinning and whether they look dead
 const pins = createPins({ file: path.join(DATA_DIR, 'pins.json'), log });
 let pinRows = []; // one row per pin, rebuilt each tick and added to the Breakout list
+// top holders of the coins people are looking at, and any single wallet holding over 3.5% of supply. On the public
+// RPC (one coin at a time), so the Helius budget stays for live account lookups
+const holders = process.env.HOLDERS !== '0' ? createHolderScan({ rpc: publicRpc, log }) : null;
 
 // ---- snapshot: restore the last run's state before the feed starts, save it every minute and on shutdown ----
 const snapshot = process.env.SNAPSHOT !== '0' ? createSnapshot({ file: path.join(DATA_DIR, 'snapshot.json.gz'), log }) : null;
@@ -345,7 +350,7 @@ function stats() {
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
-    launchBundles: launchBundles.stats(), backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
+    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
@@ -413,7 +418,7 @@ const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'bor
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
   'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV', 'rankB', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
-  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone'];
+  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -495,6 +500,8 @@ setInterval(() => {
   for (const r of latestRows) {
     const b = breakout.get(r.mint);
     if (b && r.id === b.pool) { r.flagMcap = b.entry; r.flagAt = b.flaggedAt; r.peakX = b.peak / b.entry; r.hitAt = b.hitAt; }
+    const h = holders?.row(r.mint);
+    if (h) Object.assign(r, h);
   }
   for (const c of clients) pushPools(c, false);
   sample(perf.tickMs, performance.now() - t0);
@@ -524,6 +531,9 @@ function refreshBundlePriority() {
   const rows = new Map(latestRows.map(r => [r.id, r]));
   const ordered = [...new Set(ids)].map(id => rows.get(id)).filter(Boolean);
   launchBundles.prioritize(ordered.map(r => r.mint));
+  const open = [];
+  for (const c of clients) { const r = c.selected && rows.get(c.selected); if (r) open.push(r.mint); }
+  holders?.want(open, ordered.map(r => r.mint));
   backfill?.want([...new Set(ordered.filter(r => r.program === 'pump' || (r.program === 'pumpswap' && r.mint.endsWith('pump'))).map(r => r.mint))]);
 }
 // server stats change slowly and are bulky: their own message every 2s
@@ -597,6 +607,12 @@ const server = http.createServer(async (req, res) => {
     const mint = url.searchParams.get('mint') || '', report = launchBundles.report(mint), pending = !report && backfill?.status(mint);
     res.writeHead(report ? 200 : pending ? 202 : 404, { 'content-type': 'application/json' })
       .end(JSON.stringify(report || (pending ? { backfill: pending } : { error: 'launch not seen by this server' })));
+  } else if (url.pathname === '/api/holders') {
+    // a coin's 20 biggest holders by owner, which are wallets, and whether any one holds over 3.5% of supply
+    // (202 while its first scan is waiting: open or listed coins are scanned first)
+    const mint = url.searchParams.get('mint') || '', report = holders?.report(mint);
+    res.writeHead(report ? 200 : holders ? 202 : 404, { 'content-type': 'application/json' })
+      .end(JSON.stringify(report || (holders ? { pending: true } : { error: 'holder scan is off (HOLDERS=0)' })));
   } else if (url.pathname === '/api/bundles') {
     // recent launches where wallets bought alongside the creator, newest first
     const limit = Math.max(1, Math.min(500, +url.searchParams.get('limit') || 50)), min = +url.searchParams.get('min') || 0;

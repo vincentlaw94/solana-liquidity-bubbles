@@ -106,6 +106,7 @@ venue goes quiet, re-check its event layout first.
 | `FUNDING` | on | `0` skips tracing how launch wallets were funded |
 | `BACKFILL` | on | `0` skips rebuilding launches that happened before the server started |
 | `SNAPSHOT` | on | `0` starts empty every time instead of restoring the last run (see Snapshot) |
+| `HOLDERS` | on | `0` turns off the top-holder scan (see Top holders) |
 
 Without LaserStream, the free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
 rate-limits the follow-up HTTP calls. In practice:
@@ -134,6 +135,9 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   its role, what it bought, sold and still holds, its funding, the groups funded together, and the bundles found.
   202 with `backfill` progress while a coin that launched before the server started is being rebuilt; 404 if the
   server can't produce one
+- `GET /api/holders?mint=<mint>`: a coin's top holders (see Top holders): `top` (the 20 biggest owners, each with `pct`
+  of supply, `kind` `wallet` / `program` / `burn` and how many token `accounts`), `holders`, `maxPct`, `top10Pct`,
+  `programPct`, `flagged` (wallets over `flagPct`, 3.5%). 202 while its first read is waiting
 - `GET /api/bundles?limit=50&min=0`: recent launches where wallets bought alongside the creator, newest first
   (`min`: smallest bundled %)
 - `GET /api/bundle-wallets?limit=100`: this server's compiled bundler-wallet DB, most launches first
@@ -160,7 +164,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 
 Each pool row carries `holders` (wallets holding the coin, from Jupiter's token index, re-fetched every
 minute for coins on a connected client's list), `deployer`, `deployerBundler` (+ `bundlerLaunches`, `bundlerPnl`), `liq`, `mcap`, `price`, `vol5`/`vol60`/`vol24`, `chg5`/`chg60`/`chg24`, `buys5`/`sells5`, `traders5`,
-`progress`, `graduated`, `created`, `icon`, `mint`, `links` (`{ x, web, tg }` from the coin's metadata file, set by its creator), `bundledPct`, `block0Pct`, `bundleHeldPct`, `bundleWallets`, `bundleFunded`, `bundleEst`
+`progress`, `graduated`, `created`, `icon`, `mint`, `topHolderPct`, `top10Pct`, `whales` (see Top holders), `links` (`{ x, web, tg }` from the coin's metadata file, set by its creator), `bundledPct`, `block0Pct`, `bundleHeldPct`, `bundleWallets`, `bundleFunded`, `bundleEst`
 (see Launch bundles), `ath`, `athAt` (every coin's highest market cap this server has seen, on any of its pools, at today's quote
 price), `ddAt` (coins the ATH watch follows), `flagMcap`, `flagAt`, `peakX`, `hitAt` (coins the
 Breakout list flagged), `pin` (`{ at, entry, peak, peakAt, dead, deadAt }` on pinned coins; `gone` when no pool is left), `flags` (reasons it looks inorganic, empty if none), `genuine`
@@ -177,6 +181,7 @@ and, on the trending, both and breakout lists, `score`.
 | No outside holders | a PumpSwap pool holds over 85% of the token's supply |
 | Implausible valuation | market cap over 1000× liquidity |
 | Dust liquidity | under $300 |
+| Bundled launch | 75% or more of supply bought at launch by the creator and wallets bundled with it (confirmed by Jito or the launch block, not the estimate) |
 
 Wallet-based checks run on Pump.fun, PumpSwap and Meteora DBC. LaunchLab logs don't name the trader, so
 LaunchLab pools are only judged on the other rules.
@@ -208,6 +213,25 @@ without a restart. A restart during a refresh resumes it, and a list fetched les
 refreshed again. `npm run update-bundlers` runs the same refresh by hand. `BUNDLER_REFRESH=0` skips the
 refresh, and `BUNDLER_DB=0` turns the flag off. `/api/stats` → `bundlerWallets` shows the count, date and
 refresh progress, and `/api/token?mint=` shows a coin's deployer.
+
+## Top holders
+
+`lib/holders.js` reads every holder of the coins people are looking at, and flags a coin when any single wallet holds
+over 3.5% of its supply.
+
+- **How:** the mint account (supply, and which token program it uses), then `getProgramAccounts` on that program,
+  filtered by the mint and sliced to each token account's owner and amount. The public RPC refuses
+  `getTokenLargestAccounts`, but answers this. Balances are summed per owner.
+- **Who counts:** an owner that is a program address (off the ed25519 curve: a bonding curve, AMM pool, vault or
+  locker) or the burn address isn't a person, so it's listed but never flagged. Every other owner is a wallet. An
+  exchange's wallet counts like anyone else's.
+- **Row fields:** `topHolderPct` (biggest wallet), `top10Pct` (the 10 biggest wallets together) and `whales` (how many
+  wallets are over 3.5%).
+- **Pace:** one coin at a time on the public RPC: coins whose pool someone has open every 20s, coins on someone's list
+  every 5 minutes, in list order. Each read returns the whole holder list (about 230 bytes a holder), so coins with
+  over 2,000 / 10,000 / 50,000 holders are reread at most every 10 minutes / hour / 3 hours.
+
+This doesn't count toward the Genuine only filter or the Breakout gates.
 
 ## Launch bundles
 
