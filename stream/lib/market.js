@@ -15,6 +15,7 @@ const GENUINE = {
   poolSupplyShare: 0.85,  // AMM pool holds over 85% of supply: almost nobody else holds it
   maxMcapToLiq: 1000,     // market cap over 1000x liquidity: valuation nobody could trade into
   minLiq: 300,            // under $300 of liquidity is dust
+  maxBundled: 75,         // 75%+ of supply bought at launch by the creator and wallets bundled with it (confirmed)
 };
 // SPL mint layout: mint_authority COption tag at byte 0, freeze_authority COption tag at byte 46
 const authorities = m => m?.data.length >= 82 ? { mint: m.data.readUInt32LE(0) === 1, freeze: m.data.readUInt32LE(46) === 1 } : null;
@@ -279,11 +280,11 @@ export class Market {
       // price is base-in-quote; when flipped the token's USD price is the quote price itself and changes invert
       const chg = (now_, then_) => then_ && now_ ? ((flip ? then_ / now_ : now_ / then_) - 1) * 100 : 0;
       const { liq, mcap, price } = this.value(p, p.price, p.quoteRes);
-      const flags = this.flags(p, { flip, liq, mcap, vol5, wallets, trades: buys + sells });
       const deployer = flip ? null : p.creator || null;
       const bundler = this.bundlers?.get(deployer);
       // launch bundle found by this server (a graduated pump.fun coin keeps its curve's launch)
       const lb = flip ? null : this.launchBundles?.row(p.program === 'pumpswap' ? 'pump:' + tokMint : p.id, tokMint);
+      const flags = this.flags(p, { flip, liq, mcap, vol5, wallets, trades: buys + sells, lb });
       out.push({
         id: p.id, program: p.program, venue: this.venue(p), mint: tokMint,
         sym: tok.symbol || (!flip && p.createdName?.symbol) || short(tokMint), name: tok.name || (!flip && p.createdName?.name) || '', icon: tok.icon || null,
@@ -321,7 +322,7 @@ export class Market {
   }
 
   // Reasons a pool does not look like genuine trading by real users (empty list = looks genuine).
-  flags(p, { flip, liq, mcap, vol5, wallets, trades }) {
+  flags(p, { flip, liq, mcap, vol5, wallets, trades, lb = null }) {
     const f = [];
     const auth = flip ? p.quoteAuth : p.baseAuth; // the launched token's mint
     if (auth?.mint) f.push('Mint authority active: supply can be inflated');
@@ -331,6 +332,8 @@ export class Market {
       const curve = p.program !== 'pumpswap' && !p.graduated;
       f.push(curve ? 'Sold out: curve reserve down over 90% from its peak' : 'Liquidity pulled: reserve down over 90% from its peak');
     }
+    // only once Jito or the launch block confirms it: the estimate counts every launch-slot buy, snipers included
+    if (lb && !lb.est && lb.bundledPct >= GENUINE.maxBundled) f.push('Bundled launch: ' + Math.round(lb.bundledPct) + '% of supply bought in the launch bundle');
     if (liq < GENUINE.minLiq) f.push('Dust liquidity (under $' + GENUINE.minLiq + ')');
     if (mcap && liq && mcap / liq > GENUINE.maxMcapToLiq) f.push('Market cap over ' + GENUINE.maxMcapToLiq + 'x liquidity');
     if (p.program === 'pumpswap' && mcap && liq / mcap > GENUINE.poolSupplyShare) f.push('Pool holds over 85% of supply: almost no outside holders');

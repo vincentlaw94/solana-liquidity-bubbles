@@ -10,7 +10,7 @@ chain logs. There's no third-party market-data API in between.
 - **Coverage**: Pump.fun (bonding curve and coins graduated to the Pump AMM), Raydium LaunchLab
   (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags, Moonshot and others).
 - **Genuine only filter**: hides rug pulls, wash trading, self-trading, active mint/freeze authority,
-  implausible valuations and dust pools.
+  implausible valuations, dust pools and launches 75% or more bundled.
 - **Bundler deployers**: a red flag next to the token name when the coin's deployer is a known bundler wallet
   on [isitbundled.com](https://isitbundled.com/wallets).
 - **Launch bundles**: the server checks every launch it sees for buys bundled with the creation, using Jito's
@@ -18,6 +18,10 @@ chain logs. There's no third-party market-data API in between.
   share of supply insiders bought, and the pool panel lists their wallets, what they still hold and who funded them.
   Wallets funded together are linked. Coins that launched before the server started are rebuilt from chain
   history. Caught wallets are compiled into the server's own bundler-wallet DB.
+- **Top holders**: the server reads every holder of the coins on your list (and the open coin every 20s). A Top
+  holder column shows the biggest single wallet's share of supply, and a red person icon flags a coin where any one
+  wallet holds over 3.5%. Bonding curves, AMM pools and other program accounts don't count. The pool panel lists the
+  top holders, marking the dev's wallet.
 - **Links**: each coin shows the X, website and Telegram links its creator set (unverified), an Axiom button,
   and a red flag when its launch was 20% bundled or more.
 - **ATH**: every coin has its all-time-high market cap (the highest this server has seen, on any of its pools), with

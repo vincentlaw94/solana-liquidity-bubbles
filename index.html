@@ -211,8 +211,8 @@ section { padding: 14px 16px; border-bottom: 1px solid var(--line); display: gri
 .ctl.check { cursor: pointer; }
 .tick-up { color: var(--buy); } .tick-down { color: var(--sell); }
 table.pools td, .kv dd { transition: color .5s; }
-.rf, .hb { display: inline-grid; place-items: center; color: var(--sell); cursor: help; flex: none; }
-.rf svg, .hb svg { width: 14px; height: 14px; }
+.rf, .hb, .wh { display: inline-grid; place-items: center; color: var(--sell); cursor: help; flex: none; }
+.rf svg, .hb svg, .wh svg { width: 14px; height: 14px; }
 .flags.bundler { border-color: var(--sell); background: rgba(255,100,112,.08); }
 .flags.bundler b { color: var(--sell); display: inline-flex; align-items: center; gap: 6px; }
 .flags.bundler b svg { width: 14px; height: 14px; }
@@ -228,6 +228,8 @@ table.bw a { color: inherit; }
 .role { font-size: 10.5px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
 .role.creator, .role.bundle { border-color: var(--sell); color: var(--sell); }
 .role.otherBundle, .role.linked { border-color: var(--accent); color: var(--accent); }
+.role.program, .role.burn { border-style: dashed; }
+table.bw td.hot { color: var(--sell); font-weight: 600; }
 .kb { color: var(--sell); cursor: help; margin-left: 3px; }
 .bundle-box .blist { font-size: 11.5px; color: var(--muted); display: grid; gap: 2px; }
 .warn-mark { color: var(--accent); font-size: 13px; cursor: help; flex: none; }
@@ -496,7 +498,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
       $5k–$2M market cap, not dumping, not up over 5× this hour) by room to grow, buy pressure, volume pace, traders, pool depth and curve progress.
       It is a screen, not a prediction; its record in the side panel shows how flagged coins actually did.
       "Genuine only" hides pools with red flags: liquidity pulled, wash or self-trading, active mint or freeze authority,
-      a pool holding almost all supply, an implausible market cap, or dust liquidity.
+      a pool holding almost all supply, an implausible market cap, dust liquidity, or a launch 75% or more bundled.
       Liquidity is the USD value of the quote-side reserve. Volumes and price changes count from when the server started (up to 24h).
     </footer>
   </aside>
@@ -583,6 +585,9 @@ function fromStream(r, i) {
     mint: r.mint,
     deployer: r.deployer || null,
     holders: r.holders ?? null,
+    // top-holder scan (server): biggest single wallet's % of supply, the 10 biggest wallets' together, and how many
+    // wallets hold over HOLDER_FLAG (pools, bonding curves and the burn address don't count)
+    topHolder: r.topHolderPct ?? null, top10: r.top10Pct ?? null, whales: r.whales || 0,
     ath: r.ath || null, athAt: r.athAt || null, // every coin's highest market cap this server has seen
     ddAt: r.ddAt || null, // ATH watch's 80% drawdown mark (coins that reached the Top volume top 10)
     why: r.why || [], // Breakout: why the coin scored
@@ -1199,8 +1204,40 @@ const highlyBundled = n => !!(n.bundle && !n.bundle.est && n.bundle.pct >= HIGH_
 const highBundleText = n => 'Highly bundled: ' + pct1(n.bundle.pct) + ' of supply bought at launch by the creator and wallets bundled with it' +
   (n.bundle.wallets ? ' (' + n.bundle.wallets + ' bundle wallet' + (n.bundle.wallets > 1 ? 's' : '') + ')' : '') + '; insiders hold ' + pct1(n.bundle.held) + ' now';
 function redFlagText(n) {
-  return [n.bundler ? bundlerText(n) : '', highlyBundled(n) ? highBundleText(n) : ''].filter(Boolean).join('\n');
+  return [n.bundler ? bundlerText(n) : '', highlyBundled(n) ? highBundleText(n) : '', n.whales ? whaleText(n) : ''].filter(Boolean).join('\n');
 }
+
+// ---------- top holders (the server reads every token account of the coin) ----------
+const HOLDER_FLAG = 3.5; // % of supply one wallet holds that flags the coin (stream/lib/holders.js FLAG_PCT)
+// a person: one wallet holding a large share
+const ICON_WHALE = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="8" cy="5" r="3.3"/><path d="M1.8 14.6c.4-3.3 3-5.2 6.2-5.2s5.8 1.9 6.2 5.2z"/></svg>';
+const whaleText = n => (n.whales > 1 ? n.whales + ' wallets each hold' : 'One wallet holds') + ' over ' + HOLDER_FLAG + '% of supply (largest ' + pct1(n.topHolder) + ')' +
+  (n.top10 != null ? '; the 10 biggest wallets hold ' + pct1(n.top10) : '') + '. Pools and bonding curves aren\u2019t counted';
+const HOLDER_KIND = { wallet: 'Wallet', program: 'Pool / program', burn: 'Burn' };
+const HOLDER_TIP = { wallet: 'A person\u2019s wallet (a key on the ed25519 curve)', program: 'A program address: bonding curve, AMM pool, vault or locker. Not counted', burn: 'The burn address. Not counted' };
+let holdersFor = null;
+async function loadHolders(n) {
+  const box = $('holdersBox');
+  if (!box || !n?.mint) return;
+  holdersFor = n.mint;
+  let r = null, status = 0;
+  try { const res = await fetch(IMG_BASE + '/api/holders?mint=' + encodeURIComponent(n.mint)); status = res.status; r = await res.json(); } catch {}
+  if (holdersFor !== n.mint || !box.isConnected) return;
+  if (status === 202) { setH(box, '<div class="label">Top holders</div><div class="bsum">Reading every holder of this coin\u2026</div>'); return; }
+  if (status !== 200 || !r?.top) { setH(box, '<div class="label">Top holders</div><div class="bsum">' + (r?.error ? esc(r.error) : 'Couldn\u2019t load the holders.') + '</div>'); return; }
+  const kind = h => h.kind === 'wallet' && h.owner === n.deployer ? 'Dev' : HOLDER_KIND[h.kind] || h.kind;
+  setH(box, '<div class="label">Top holders \u00b7 read ' + ago(r.at) + ' ago</div>' +
+    '<div class="bsum">' + r.holders.toLocaleString() + ' holders \u00b7 biggest wallet <b class="' + (r.maxPct > r.flagPct ? 'hot' : '') + '">' + pct1(r.maxPct) + '</b>' +
+      ' \u00b7 top 10 wallets <b>' + pct1(r.top10Pct) + '</b>' + (r.programPct ? ' \u00b7 pools / curves <b>' + pct1(r.programPct) + '</b>' : '') +
+      (r.flagged ? '<br><b class="hot">' + r.flagged + ' wallet' + (r.flagged > 1 ? 's' : '') + ' over ' + r.flagPct + '%</b>' : '<br>No wallet holds over ' + r.flagPct + '%') + '</div>' +
+    '<table class="bw"><thead><tr><th>Holder</th><th>Kind</th><th title="% of supply held">Holds</th></tr></thead><tbody>' +
+    r.top.slice(0, 12).map(h => '<tr><td><a href="https://solscan.io/account/' + encodeURIComponent(h.owner) + '" target="_blank" rel="noopener">' + esc(short(h.owner)) + '</a>' +
+      (h.accounts > 1 ? ' <small title="Held across ' + h.accounts + ' token accounts">\u00d7' + h.accounts + '</small>' : '') + '</td>' +
+      '<td><span class="role ' + esc(h.kind) + '" title="' + esc(HOLDER_TIP[h.kind] || '') + '">' + esc(kind(h)) + '</span></td>' +
+      '<td class="' + (h.kind === 'wallet' && h.pct > r.flagPct ? 'hot' : '') + '">' + pct1(h.pct) + '</td></tr>').join('') + '</tbody></table>');
+}
+// the open coin's holders, reloaded every 10s while the panel shows them (the server rereads an open coin every 20s)
+setInterval(() => { if (state.selected && $('holdersBox')) loadHolders(state.selected); }, 10000);
 
 // ---------- hide coins ----------
 const ICON_HIDE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 2l12 12"/><path d="M6.6 3.6A6.8 6.8 0 0 1 8 3.5c3.6 0 6 4.5 6 4.5a11 11 0 0 1-1.9 2.4M4.2 4.9C2.8 6 2 8 2 8s2.4 4.5 6 4.5c1 0 1.9-.3 2.7-.7"/><path d="M6.6 6.7a2 2 0 0 0 2.8 2.7"/></svg>';
@@ -1310,9 +1347,9 @@ const COLUMNS = {
   rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => { setT(td, String(ctx.rank(n) ?? '–')); } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
     init: td => {
-      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="hb" hidden>' + ICON_BUNDLE + '</span><span class="warn-mark" hidden>⚠</span><span class="dead-badge" hidden>DEAD</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="pin-slot"></span><span class="hide-slot"></span></div>';
+      td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="hb" hidden>' + ICON_BUNDLE + '</span><span class="wh" hidden>' + ICON_WHALE + '</span><span class="warn-mark" hidden>⚠</span><span class="dead-badge" hidden>DEAD</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="pin-slot"></span><span class="hide-slot"></span></div>';
       td._lg = td.querySelector('.lg'); td._b = td.querySelector('b'); td._small = td.querySelector('small');
-      td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._hb = td.querySelector('.hb'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot'); td._links = td.querySelector('.links-slot'); td._ax = td.querySelector('.axiom-slot');
+      td._wm = td.querySelector('.warn-mark'); td._rf = td.querySelector('.rf'); td._hb = td.querySelector('.hb'); td._wh = td.querySelector('.wh'); td._ca = td.querySelector('.ca-slot'); td._hide = td.querySelector('.hide-slot'); td._links = td.querySelector('.links-slot'); td._ax = td.querySelector('.axiom-slot');
       td._pin = td.querySelector('.pin-slot'); td._dead = td.querySelector('.dead-badge');
     },
     set: (td, n) => {
@@ -1334,6 +1371,11 @@ const COLUMNS = {
       if (td._hbText !== hb) {
         td._hbText = hb; td._hb.hidden = !hb;
         if (hb) { td._hb.title = hb; td._hb.setAttribute('aria-label', hb); }
+      }
+      const wh = n.whales ? whaleText(n) : '';
+      if (td._whText !== wh) {
+        td._whText = wh; td._wh.hidden = !wh;
+        if (wh) { td._wh.title = wh; td._wh.setAttribute('aria-label', wh); }
       }
       const mint = n.mint || '';
       if (td._mint !== mint) { td._mint = mint; td._ca.innerHTML = copyButtonHtml(n.mint, n.sym); td._hide.innerHTML = hideButtonHtml(n); td._ax.innerHTML = axiomHtml(n); }
@@ -1403,6 +1445,21 @@ const COLUMNS = {
     } },
   holders: { label: 'Holders', sort: n => n.holders ?? -Infinity,
     set: (td, n) => { setT(td, n.holders != null ? n.holders.toLocaleString() : '–'); if (!td.title) td.title = 'Wallets holding the coin (Jupiter, refreshed every minute)'; } },
+  // top-holder scan: biggest single wallet (red over HOLDER_FLAG), and the 10 biggest together
+  topHolder: { label: 'Top holder', sort: n => n.topHolder ?? -1,
+    set: (td, n) => {
+      setT(td, n.topHolder != null ? pct1(n.topHolder) : '\u2013'); setC(td, n.topHolder > HOLDER_FLAG ? 'down' : '');
+      const t = n.topHolder == null ? 'Holders not read yet (coins on the list are read in turn)' :
+        'Biggest single wallet holds ' + pct1(n.topHolder) + ' of supply' + (n.whales ? '; ' + n.whales + ' wallet' + (n.whales > 1 ? 's' : '') + ' over ' + HOLDER_FLAG + '%' : '') +
+        (n.top10 != null ? '; the 10 biggest wallets hold ' + pct1(n.top10) : '') + '. Pools and bonding curves aren\u2019t counted';
+      if (td.title !== t) td.title = t;
+    } },
+  top10: { label: 'Top 10', sort: n => n.top10 ?? -1,
+    set: (td, n) => {
+      setT(td, n.top10 != null ? pct1(n.top10) : '\u2013');
+      const t = n.top10 != null ? 'The 10 biggest wallets hold ' + pct1(n.top10) + ' of supply (pools and bonding curves aren\u2019t counted)' : 'Holders not read yet';
+      if (td.title !== t) td.title = t;
+    } },
   bundled: { label: 'Bundled', sort: n => n.bundle?.pct ?? -1,
     set: (td, n) => {
       const b = n.bundle;
@@ -1429,7 +1486,7 @@ const COLUMNS = {
       if (td._born !== n.born) { td._born = n.born; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; }
     } },
 };
-const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
+const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'topHolder', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
 function normalizeColumns(saved) {
   const out = [], seen = new Set();
   for (const c of Array.isArray(saved) ? saved : []) {
@@ -1922,7 +1979,7 @@ function renderLegend() {
 // The panel is rebuilt only when its structure changes (another pool, flags appear, a row comes or goes).
 // Otherwise its numbers are updated in place, so the logo and links aren't re-created twice a second.
 function poolShape(n) {
-  return [n.id, n.sym, n.name, n.dex, n.icon, n.mint, n.deployer, !!n.bundler, !!n.bundle, highlyBundled(n), n.links ? [n.links.x, n.links.web, n.links.tg].join() : '', n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
+  return [n.id, n.sym, n.name, n.dex, n.icon, n.mint, n.deployer, !!n.bundler, !!n.bundle, highlyBundled(n), !!n.whales, n.links ? [n.links.x, n.links.web, n.links.tg].join() : '', n.flags.join('|'), !!n.traders5, n.score != null, n.progress != null, !!n.born, n.program].join('~');
 }
 function renderPool(refreshOnly) {
   const el = $('poolPanel'), n = state.selected;
@@ -1940,6 +1997,7 @@ function renderPool(refreshOnly) {
     (n.bundler ? '<div class="flags bundler"><b>' + ICON_RED_FLAG + 'Bundler deployer</b><span>' + esc(bundlerText(n)) + '. ' +
       '<a href="https://isitbundled.com/" target="_blank" rel="noopener">isitbundled.com ↗</a></span></div>' : '') +
     (highlyBundled(n) ? '<div class="flags bundler"><b>' + ICON_BUNDLE + 'Highly bundled</b><span>' + esc(highBundleText(n)) + '.</span></div>' : '') +
+    (n.whales ? '<div class="flags bundler"><b>' + ICON_WHALE + 'Concentrated holder</b><span data-f="whaleText">' + esc(whaleText(n)) + '.</span></div>' : '') +
     (n.mint ? '<div class="ca"><span class="lbl">CA</span><code>' + esc(n.mint) + '</code>' + linksHtml(n) + axiomHtml(n) + copyButtonHtml(n.mint, n.sym) + '</div>' : '') +
     (n.deployer ? '<div class="ca"><span class="lbl">Dev</span><code>' + esc(n.deployer) + '</code>' + copyButtonHtml(n.deployer, 'deployer') + '</div>' : '') +
     '<dl class="kv">' +
@@ -1958,6 +2016,7 @@ function renderPool(refreshOnly) {
     '<div><div class="ratio"><div data-f="ratio" style="width:' + (tx ? 100 * n.buys5 / tx : 50) + '%"></div></div>' +
     '<div class="ratio-labels"><span class="up" data-f="buys">5m buys ' + n.buys5 + '</span><span class="down" data-f="sells">sells ' + n.sells5 + '</span></div></div>' +
     (n.bundle || n.program === 'pump' || /pump$/.test(n.mint || '') ? '<div class="bundle-box" id="bundleBox"><div class="label">Launch bundle</div><div class="bsum">Loading…</div></div>' : '') +
+    (n.mint ? '<div class="bundle-box" id="holdersBox"><div class="label">Top holders</div><div class="bsum">Loading\u2026</div></div>' : '') +
     '<div class="links">' +
       (n.program === 'pump' ? '<a href="https://pump.fun/coin/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Pump.fun ↗</a>' : '') +
       '<a href="' + esc(axiomUrl(n.addr)) + '" target="_blank" rel="noopener">Axiom ↗</a>' +
@@ -1966,6 +2025,7 @@ function renderPool(refreshOnly) {
     '<div class="label">Live swaps</div><div class="tape" id="tape"><div class="empty">Loading swaps…</div></div>';
   $('closePool').addEventListener('click', () => select(null));
   if ($('bundleBox')) loadBundle(n);
+  if ($('holdersBox')) loadHolders(n);
   if (tradeFor === n.addr) renderTape(refreshOnly);
 }
 const progressText = n => n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation';
@@ -1984,6 +2044,7 @@ function refreshPool(n) {
   const put = (k, t) => { const e = f(k); if (e) setT(e, t); };
   put('vol24', usd(n.vol24)); put('vol1', usd(n.vol1)); put('vol5', usd(n.vol5));
   put('holders', n.holders != null ? n.holders.toLocaleString() : '–');
+  if (n.whales) put('whaleText', whaleText(n) + '.');
   put('ath', athText(n)); { const e = f('ath'); if (e) setC(e, n.ddAt || (n.ath && athDrop(n.mcap, n.ath) <= -80) ? 'down' : ''); }
   put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
   if (n.progress != null) { put('progressText', progressText(n)); const b = f('progressBar'); if (b) setS(b, 'width', (n.progress * 100).toFixed(1) + '%'); }
