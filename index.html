@@ -56,6 +56,14 @@ header {
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(46,211,163,.6); } 70% { box-shadow: 0 0 0 8px rgba(46,211,163,0); } 100% { box-shadow: 0 0 0 0 rgba(46,211,163,0); } }
 
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* the header collapses to one slim line (the live status) to give the lists the room */
+.hdr-toggle { margin-left: auto; background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); cursor: pointer;
+  width: 26px; height: 22px; padding: 0; display: grid; place-items: center; }
+.hdr-toggle:hover, .hdr-toggle:focus-visible { color: var(--fg); background: var(--raise); }
+.hdr-toggle svg { width: 12px; height: 12px; transition: transform .15s; }
+header.collapsed { padding-top: 4px; padding-bottom: 4px; }
+header.collapsed .controls, header.collapsed .rpc-info { display: none; }
+header.collapsed .hdr-toggle svg { transform: rotate(180deg); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .seg button { background: transparent; border: 0; padding: 5px 10px; cursor: pointer; color: var(--muted); font-size: 12px; }
 .seg button + button { border-left: 1px solid var(--line); }
@@ -386,7 +394,8 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
   <h1 class="sr-only">Solana Liquidity Bubbles</h1>
   <div class="status" role="status" aria-live="polite"><span class="dot warn" id="dot"></span><span id="statusText">Connecting…</span></div>
   <div class="rpc-info" id="rpcInfo" hidden></div>
-  <div class="controls">
+  <button type="button" class="hdr-toggle" id="hdrToggle" aria-expanded="true" aria-controls="controls" title="Hide the controls"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 7.5L6 4l3.5 3.5"/></svg></button>
+  <div class="controls" id="controls">
     <div class="seg" role="group" aria-label="View" id="viewSeg">
       <button type="button" data-v="map" aria-pressed="false">Map</button>
       <button type="button" data-v="list" aria-pressed="true">List</button>
@@ -548,7 +557,7 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
-const state = { list: 'trending', volWindow: '1h', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], ages: {}, ageFavs: null, ageOpen: null, size: 'log', view: 'list', panel: true, sorts: {}, query: '', selected: null, hover: null,
+const state = { list: 'trending', volWindow: '1h', headerOpen: true, colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], ages: {}, ageFavs: null, ageOpen: null, size: 'log', view: 'list', panel: true, sorts: {}, query: '', selected: null, hover: null,
                 panels: [{ list: 'trending' }, { list: 'top' }, { list: 'breakout' }], paneCollapsed: [false, false, false], colWidths: {}, lastUpdate: 0, error: null };
 let nodes = [];
 const byId = new Map();
@@ -2031,7 +2040,7 @@ const SETTINGS_KEY = 'solana-liquidity-bubbles:settings:v1';
 function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      view: state.view, list: state.list, volWindow: state.volWindow, panel: state.panel, colorBy: state.colorBy, size: state.size,
+      view: state.view, list: state.list, volWindow: state.volWindow, headerOpen: state.headerOpen, panel: state.panel, colorBy: state.colorBy, size: state.size,
       group: state.group, genuine: state.genuine, hidden: state.hidden, pins: state.pins, sorts: state.sorts, columns: state.columns,
       ages: state.ages, ageFavs: state.ageFavs, ageOpen: state.ageOpen, panels: state.panels, paneSizes: state.paneSizes, paneCollapsed: state.paneCollapsed, colWidths: state.colWidths,
     }));
@@ -2049,6 +2058,7 @@ function restoreSettings() {
   if (typeof s.group === 'boolean') state.group = s.group;
   if (typeof s.genuine === 'boolean') state.genuine = s.genuine;
   if (typeof s.panel === 'boolean') state.panel = s.panel;
+  if (typeof s.headerOpen === 'boolean') state.headerOpen = s.headerOpen;
   if (Array.isArray(s.hidden)) {
     state.hidden = s.hidden.filter(h => h && typeof h.mint === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(h.mint))
       .map(h => ({ mint: h.mint, sym: String(h.sym || '').slice(0, 40) })).slice(-500);
@@ -2411,6 +2421,16 @@ function setPanel(on) {
   $('panelBtn').setAttribute('aria-expanded', on ? 'true' : 'false');
 }
 $('panelBtn').addEventListener('click', () => setPanel(!state.panel));
+// the header's controls can be folded away, leaving one slim status line
+function setHeader(open) {
+  state.headerOpen = open;
+  document.querySelector('header').classList.toggle('collapsed', !open);
+  $('hdrToggle').setAttribute('aria-expanded', String(open));
+  $('hdrToggle').title = open ? 'Hide the controls' : 'Show the controls';
+  $('hdrToggle').setAttribute('aria-label', $('hdrToggle').title);
+  if (!open) { ageMenu(false); panelMenu(false); openColPanel(false); } // their menus would float over nothing
+}
+$('hdrToggle').addEventListener('click', () => setHeader(!state.headerOpen));
 function setView(v) {
   state.view = v;
   const list = v === 'list';
@@ -2450,7 +2470,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---------- boot ----------
-restoreSettings(); syncControls(); renderAgePick(); setPanel(state.panel); setupPanes(); renderHead(); renderHiddenBtn(); setView(state.view);
+restoreSettings(); syncControls(); renderAgePick(); setPanel(state.panel); setHeader(state.headerOpen); setupPanes(); renderHead(); renderHiddenBtn(); setView(state.view);
 resize(); applyListUi();
 startFrames();
 setInterval(() => {
