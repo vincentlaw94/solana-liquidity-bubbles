@@ -33,3 +33,20 @@ test('each window sums only what falls inside it', () => {
   assert.equal(vol('2h'), null);                 // not a window
   assert.deepEqual(Object.keys(VOL_WINDOWS), ['1m', '15m', '30m', '1h', '4h', '12h', '24h']);
 });
+
+test('buys and sells are counted over the same windows', () => {
+  const m = new Market(deps());
+  m.onEvent(trade);                    // a buy now
+  m.onEvent({ ...trade, buy: false }); // a sell now
+  const p = m.pools.get('pump:MINT'), now = p.lastTs;
+  const minute = Math.floor(now / 60e3), hour = Math.floor(now / 3600e3);
+  p.mins.unshift({ m: minute - 20, q: 4, b: 3, s: 1 });
+  p.hours.unshift({ h: hour - 3, q: 16, b: 10, s: 5 }, { h: hour - 10, q: 8 }); // an old bucket without counts
+  const flow = w => { const f = m.flowIn('pump:MINT', w, now); return [f.buys, f.sells]; };
+  assert.deepEqual(flow('1m'), [1, 1]);
+  assert.deepEqual(flow('15m'), [1, 1]);
+  assert.deepEqual(flow('30m'), [4, 2]);
+  assert.deepEqual(flow('4h'), [11, 6]);
+  assert.deepEqual(flow('24h'), [11, 6]); // the bucket from before counts were kept adds none
+  assert.equal(m.flowIn('pump:MINT', '1m', now).usd, m.volumeIn('pump:MINT', '1m', now));
+});

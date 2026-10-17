@@ -288,7 +288,8 @@ function trendScore(r, now) {
   const buyShare = r.buys5 / Math.max(1, r.buys5 + r.sells5);
   return Math.log10(1 + r.vol5) * (1 + Math.min(3, pace)) * (0.6 + buyShare) * (1 + Math.min(1, r.traders5 / 40)) * (1 + Math.max(0, Math.min(1, r.chg5 / 50)));
 }
-// "volume" ranks by volume over the window the viewer picked (1m to 24h); each row carries it as volW (and in vols)
+// "volume" ranks by volume over the window the viewer picked (1m to 24h); each row carries it as volW (and in vols),
+// and its buys and sells over the window in bs
 // "both" is the dashboard's Panels view: the union of the lists in `panels` (by default Trending, Top volume and
 // Breakout), each coin tagged with its place in each as `ranks` (one entry per panel, null where it isn't listed).
 // Breakout coins also carry their setup score as `setup`, and why; Volume coins their volume per window as `vols`.
@@ -307,7 +308,10 @@ function readPanels(v) {
 const rankTop = (eligible, limit) => eligible.slice().sort((a, b) => b.vol24 - a.vol24 || b.vol5 - a.vol5).slice(0, limit);
 function rankVolume(eligible, limit, win, now) {
   const out = [];
-  for (const r of eligible) { const v = market.volumeIn(r.id, win, now); if (v > 0) out.push({ ...r, volW: v, vols: { [win]: v } }); }
+  for (const r of eligible) {
+    const f = market.flowIn(r.id, win, now);
+    if (f?.usd > 0) out.push({ ...r, volW: f.usd, vols: { [win]: f.usd }, bs: { [win]: [f.buys, f.sells] } });
+  }
   return out.sort((a, b) => b.volW - a.volW).slice(0, limit);
 }
 function rankTrending(eligible, limit, now) {
@@ -335,11 +339,11 @@ function pick(rows, cfg) {
   cfg.panels.forEach((p, i) => rank(p).forEach((r, j) => {
     let o = out.get(r.id);
     // `score` is the trend score: Breakout's own score travels as `setup`
-    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, volW: null, vols: null, ranks: new Array(n).fill(null) });
+    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, volW: null, vols: null, bs: null, ranks: new Array(n).fill(null) });
     o.ranks[i] = j + 1;
     if (p.list === 'trending') o.score = r.score;
     else if (p.list === 'breakout') Object.assign(o, { setup: r.setup, why: r.why });
-    else if (p.list === 'volume') o.vols = { ...o.vols, [p.window]: r.volW };
+    else if (p.list === 'volume') { o.vols = { ...o.vols, [p.window]: r.volW }; o.bs = { ...o.bs, ...r.bs }; }
   }));
   return [...out.values()];
 }
@@ -441,7 +445,7 @@ let latestRows = [];
 // its live fields are re-sent only when one of them changed since that client last received them.
 const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer', 'links'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'setup',
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'bs', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
   'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes

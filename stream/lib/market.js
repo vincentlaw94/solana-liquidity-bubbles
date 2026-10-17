@@ -212,12 +212,14 @@ export class Market {
     p.tape.push(t); if (p.tape.length > TAPE) p.tape.shift();
     const minute = Math.floor(ev.at / 60e3);
     let bucket = p.mins[p.mins.length - 1];
-    if (!bucket || bucket.m !== minute) p.mins.push(bucket = { m: minute, open: p.price, q: 0 });
+    if (!bucket || bucket.m !== minute) p.mins.push(bucket = { m: minute, open: p.price, q: 0, b: 0, s: 0 });
     bucket.q += quote; p.vol60 += quote;
+    if (t.b) bucket.b++; else bucket.s++; // buy and sell counts, for the Volume list's buy/sell ratio
     const hour = Math.floor(ev.at / 3600e3);
     let hb = p.hours[p.hours.length - 1];
-    if (!hb || hb.h !== hour) p.hours.push(hb = { h: hour, open: p.price, q: 0, hi: 0, hiAt: ev.at });
+    if (!hb || hb.h !== hour) p.hours.push(hb = { h: hour, open: p.price, q: 0, b: 0, s: 0, hi: 0, hiAt: ev.at });
     hb.q += quote; p.vol24 += quote;
+    if (t.b) hb.b++; else hb.s++;
     if (p.price > hb.hi) { hb.hi = p.price; hb.hiAt = ev.at; } // the hour's high, for the ATH watch (lib/ath.js)
     p.lastTs = ev.at;
     this.counts.trades++;
@@ -250,16 +252,21 @@ export class Market {
     if (!p.hours.length) p.vol24 = 0;
   }
 
-  // a pool's volume over one of VOL_WINDOWS, in USD (null when its quote token has no price)
-  volumeIn(id, win, now = Date.now()) {
+  // a pool's trading over one of VOL_WINDOWS: volume in USD, and how many buys and sells of the launched token
+  // (null when its quote token has no price). Buckets from snapshots taken before they counted sides count as 0.
+  flowIn(id, win, now = Date.now()) {
     const p = this.pools.get(id), w = VOL_WINDOWS[win], qUsd = p && this.prices.get(p.quoteMint);
     if (!w || !qUsd) return null;
-    let q = 0;
-    if (w.ms) { for (let i = p.w5.length - 1; i >= p.w5h && p.w5[i].t >= now - w.ms; i--) q += p.w5[i].q; }
-    else if (w.mins) { const from = Math.floor(now / 60e3) - w.mins; for (const b of p.mins) if (b.m > from) q += b.q; }
-    else { const from = Math.floor(now / 3600e3) - w.hours; for (const b of p.hours) if (b.h > from) q += b.q; }
-    return Math.max(0, q) * qUsd;
+    let q = 0, b = 0, s = 0;
+    const add = x => { q += x.q; b += x.b || 0; s += x.s || 0; };
+    if (w.ms) { for (let i = p.w5.length - 1; i >= p.w5h && p.w5[i].t >= now - w.ms; i--) { const t = p.w5[i]; q += t.q; if (t.b) b++; else s++; } }
+    else if (w.mins) { const from = Math.floor(now / 60e3) - w.mins; for (const x of p.mins) if (x.m > from) add(x); }
+    else { const from = Math.floor(now / 3600e3) - w.hours; for (const x of p.hours) if (x.h > from) add(x); }
+    // in a flipped pool, buying the base (SOL) means selling the launched token
+    const flip = MAJORS.has(p.mint) && !MAJORS.has(p.quoteMint);
+    return { usd: Math.max(0, q) * qUsd, buys: flip ? s : b, sells: flip ? b : s };
   }
+  volumeIn(id, win, now = Date.now()) { return this.flowIn(id, win, now)?.usd ?? null; }
 
   venue(p) {
     if (p.program === 'pump') return 'Pump.fun';
