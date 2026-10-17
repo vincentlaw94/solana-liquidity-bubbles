@@ -262,6 +262,31 @@ table.bw td.hot { color: var(--sell); font-weight: 600; }
   .list-pane.collapsed .pane-toggle svg { transform: none; }
 }
 #listView .list-scroll { flex: 1; min-height: 0; overflow: auto; }
+/* Panels: a panel's title bar carries its window (Volume) and a remove button; the Add panel menu */
+.pane-title { display: flex; align-items: center; }
+.pane-title .pane-toggle { flex: 1; min-width: 0; width: auto; }
+.pane-tools { display: flex; align-items: center; gap: 6px; padding-right: 8px; text-transform: none; letter-spacing: 0; }
+.pane-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-win { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 5px; font: inherit; font-size: 11px; padding: 2px 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.pane-win:hover, .pane-win:focus-visible { border-color: var(--muted); }
+.pane-close { all: unset; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 12px; }
+.pane-close:hover, .pane-close:focus-visible { color: var(--fg); background: var(--raise); }
+.pane-close:disabled { opacity: .35; cursor: default; background: none; }
+/* reordering panels: drag a title onto another panel (or Alt + arrow on a focused title) */
+.list-pane:not(.collapsed) .pane-title[draggable="true"] { cursor: grab; }
+.list-pane.dragging { opacity: .5; }
+.list-pane.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+.list-pane.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+@media (max-width: 1200px) {
+  .list-pane.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
+  .list-pane.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+}
+.list-pane.collapsed .pane-tools { display: none; }
+.addpanel { position: relative; }
+.addpanel .pm-h { padding: 10px 14px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); }
+.addpanel .pm-wins { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 10px 10px; }
+.addpanel .pm-wins button { all: unset; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; color: var(--fg); cursor: pointer; font-variant-numeric: tabular-nums; }
+.addpanel .pm-wins button:hover, .addpanel .pm-wins button:focus-visible { background: var(--raise); border-color: var(--muted); }
 #panelBtn[aria-expanded] { border-color: var(--line); }
 #panelBtn:hover { border-color: var(--muted); }
 main.panel-off { grid-template-columns: minmax(0, 1fr); }
@@ -358,8 +383,25 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <div class="seg" role="group" aria-label="Pool list" id="srcSeg">
       <button type="button" data-v="trending" aria-pressed="true">Trending</button>
       <button type="button" data-v="top" aria-pressed="false">Top volume</button>
-      <button type="button" data-v="both" aria-pressed="false" title="Trending and Top volume side by side">Both</button>
+      <button type="button" data-v="volume" aria-pressed="false" title="Ranked by volume over the window you pick, from the last minute to the last 24 hours">Volume</button>
+      <button type="button" data-v="both" aria-pressed="false" title="Several lists side by side: add, remove and resize panels">Panels</button>
       <button type="button" data-v="breakout" aria-pressed="false" title="Safer small caps whose trading looks like the setups before a 2x. A screen, not a prediction: see its record in the side panel">Breakout</button>
+    </div>
+    <div class="addpanel" id="addPanel" hidden>
+      <button type="button" class="btn" id="addPanelBtn" aria-haspopup="true" aria-expanded="false" aria-controls="panelMenu">+ Add panel</button>
+      <div class="agemenu" id="panelMenu" hidden></div>
+    </div>
+    <div class="agepick" id="volWindowCtl" hidden>
+      <span id="volWindowLabel">Window</span>
+      <div class="seg" role="group" aria-labelledby="volWindowLabel" id="volWindow">
+        <button type="button" data-v="1m" aria-pressed="false" title="Volume in the last minute">1m</button>
+        <button type="button" data-v="15m" aria-pressed="false" title="Volume in the last 15 minutes">15m</button>
+        <button type="button" data-v="30m" aria-pressed="false" title="Volume in the last 30 minutes">30m</button>
+        <button type="button" data-v="1h" aria-pressed="true" title="Volume in the last hour">1h</button>
+        <button type="button" data-v="4h" aria-pressed="false" title="Volume in the last 4 hours">4h</button>
+        <button type="button" data-v="12h" aria-pressed="false" title="Volume in the last 12 hours">12h</button>
+        <button type="button" data-v="24h" aria-pressed="false" title="Volume in the last 24 hours">24h</button>
+      </div>
     </div>
     <div class="agepick" id="agePick">
       <span id="ageLabel">Age</span>
@@ -412,31 +454,8 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
         <span><button type="button" class="btn" id="colReset">Reset</button> <button type="button" class="btn primary" id="colDone">Done</button></span>
       </div>
     </div>
-    <div id="listView" hidden>
-      <div class="list-pane" id="paneA">
-        <div class="pane-title" hidden><button type="button" class="pane-toggle" aria-expanded="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg><span></span></button></div>
-        <div class="list-scroll">
-          <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
-          <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
-        </div>
-      </div>
-      <div class="pane-split" data-i="0" role="separator" aria-orientation="vertical" aria-valuemin="10" aria-valuemax="90" tabindex="0" aria-label="Resize lists (double-click to even them out)" hidden></div>
-      <div class="list-pane" id="paneB" hidden>
-        <div class="pane-title"><button type="button" class="pane-toggle" aria-expanded="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg><span></span></button></div>
-        <div class="list-scroll">
-          <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
-          <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
-        </div>
-      </div>
-      <div class="pane-split" data-i="1" role="separator" aria-orientation="vertical" aria-valuemin="10" aria-valuemax="90" tabindex="0" aria-label="Resize lists (double-click to even them out)" hidden></div>
-      <div class="list-pane" id="paneC" hidden>
-        <div class="pane-title"><button type="button" class="pane-toggle" aria-expanded="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg><span></span></button></div>
-        <div class="list-scroll">
-          <table class="pools"><thead><tr></tr></thead><tbody></tbody></table>
-          <div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div>
-        </div>
-      </div>
-    </div>
+    <!-- one table per list (lists side by side in Panels), built by setupPanes() -->
+    <div id="listView" hidden></div>
   </div>
 
   <aside id="sidePanel">
@@ -506,7 +525,9 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 
 <script>
 // Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
-const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Trending + Top volume + Breakout', breakout: 'Breakout' };
+const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Panels', breakout: 'Breakout', volume: 'Volume' };
+// the Volume list's windows (stream/lib/market.js VOL_WINDOWS)
+const VOL_WINDOWS = ['1m', '15m', '30m', '1h', '4h', '12h', '24h'];
 const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
 const DEX_PALETTE = ['#f3b33d', '#5aa9ff', '#c38bff', '#2ed3a3', '#ff8a5c', '#ff6fb1', '#9ee35b', '#4fd6e8'];
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -516,8 +537,8 @@ const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).
 const FONT_DISPLAY = css('--display'), FONT_MONO = css('--mono');
 const C = { buy: css('--buy'), sell: css('--sell'), neutral: css('--neutral'), accent: css('--accent'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
 
-const state = { list: 'trending', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], ages: {}, ageFavs: null, ageOpen: null, size: 'log', view: 'list', panel: true, sorts: {}, query: '', selected: null, hover: null,
-                paneCollapsed: [false, false, false], colWidths: {}, lastUpdate: 0, error: null };
+const state = { list: 'trending', volWindow: '1h', colorBy: 'm5', group: true, genuine: true, hidden: [], pins: [], ages: {}, ageFavs: null, ageOpen: null, size: 'log', view: 'list', panel: true, sorts: {}, query: '', selected: null, hover: null,
+                panels: [{ list: 'trending' }, { list: 'top' }, { list: 'breakout' }], paneCollapsed: [false, false, false], colWidths: {}, lastUpdate: 0, error: null };
 let nodes = [];
 const byId = new Map();
 const dexColor = new Map();
@@ -576,9 +597,10 @@ function getDexColor(d) {
 const realImage = url => url && /^https?:/.test(url) && !/missing/i.test(url) ? url : null;
 function fromStream(r, i) {
   return {
-    // rankT / rankV / rankB: place in Trending / Top volume / Breakout when Both is shown; setup: Breakout's score
-    id: r.id, rank: i + 1, rankT: r.rankT ?? null, rankV: r.rankV ?? null, rankB: r.rankB ?? null, setup: r.setup ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
-    vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg: { m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
+    // ranks: place in each panel of Panels (null where not listed); setup: Breakout's score; vols: volume per window
+    // (the Volume list's, or each Volume panel's)
+    id: r.id, rank: i + 1, ranks: r.ranks || null, vols: r.vols || null, setup: r.setup ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
+    vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg:{ m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
     buys5: r.buys5, sells5: r.sells5, price: r.price, mcap: r.mcap || 0, flags: r.flags || [],
     created: r.created || 0, born: r.born || 0, firstSeen: r.firstSeen, progress: r.progress, graduated: r.graduated,
     icon: realImage(r.icon),
@@ -648,7 +670,8 @@ const IMG_BASE = location.port === '8787' ? '' : STREAM_URL.replace(/^ws/, 'http
 const imgSrc = u => IMG_BASE + '/img?u=' + encodeURIComponent(u);
 const feed = [];
 function streamSend(m) { if (stream.open) stream.ws.send(JSON.stringify(m)); }
-function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, genuine: state.genuine, maxAge: AGES.get(curAge())?.ms || 0 }); }
+function streamConfig() { streamSend({ type: 'config', list: state.list, limit: 100, genuine: state.genuine, maxAge: AGES.get(curAge())?.ms || 0, window: state.volWindow,
+  ...(state.list === 'both' ? { panels: state.panels } : {}) }); }
 function streamConnect() {
   if (stream.ws) return;
   clearTimeout(stream.timer);
@@ -1329,6 +1352,7 @@ setInterval(() => {
 // Every column the list can show. `init` builds a cell once and `set` refreshes it in place,
 // so rows (and their logo images) survive the 4x/second refresh.
 const mcapOf = n => n.mcap || NaN;
+const volOf = (n, p) => n.vols?.[p?.window] ?? null; // volume over a pane's window (Volume list, Volume panels)
 const athDrop = (mcap, ath) => Math.min(0, (mcap / ath - 1) * 100); // % below the high
 const barCell = color => '<div class="cellbar"><span></span><div class="mini"><div' + (color ? ' style="background:' + color + '"' : '') + '></div></div></div>';
 // show a value and tint it green/red for a moment when it moves
@@ -1402,6 +1426,9 @@ const COLUMNS = {
   vol5: { label: 'Vol 5m', sort: n => n.vol5, set: (td, n) => { setT(td, usd(n.vol5)); } },
   vol1: { label: 'Vol 1h', sort: n => n.vol1, set: (td, n) => { setT(td, usd(n.vol1)); } },
   vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { setT(td, usd(n.vol24)); } },
+  // the Volume list's window, whichever the viewer picked
+  volW: { label: 'Vol (window)', head: p => 'Vol ' + p.window, sort: (n, p) => volOf(n, p) ?? -Infinity,
+    set: (td, n, ctx) => { const v = volOf(n, ctx.pane); setT(td, v != null ? usd(v) : '–'); } },
   traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { setT(td, n.traders5 ? String(n.traders5) : '–'); } },
   score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { setT(td, n.score != null ? n.score.toFixed(1) : '–'); } },
   // Breakout list: setup score (0-100) and the reasons behind it
@@ -1505,51 +1532,202 @@ function normalizeColumns(saved) {
   return out;
 }
 state.columns = normalizeColumns(null);
-// the Breakout list (and its pane in Both) always shows its own columns, right after the token
+// the Breakout list (and its panels) always shows its own columns, right after the token; Volume its window's volume
 const BREAKOUT_COLUMNS = ['setup', 'sinceFlag'];
 // and "Since pinned" while any coin is pinned
 const shownColumns = pane => {
   const cols = state.columns.filter(c => c.on).map(c => c.key);
-  const extra = pane.breakout ? BREAKOUT_COLUMNS.filter(k => !cols.includes(k)) : [];
+  const extra = pane.breakout ? BREAKOUT_COLUMNS.filter(k => !cols.includes(k)) : pane.list === 'volume' && !cols.includes('volW') ? ['volW'] : [];
   if (pinsShown() && !cols.includes('sincePin') && nodes.some(n => n.pin)) extra.unshift('sincePin');
   cols.splice(cols.indexOf('token') + 1, 0, ...extra);
   return cols;
 };
 
-// One table per list. With "Both", pane A shows the Trending coins, pane B the Top volume coins and pane C the
-// Breakout coins, each ranked by its own list; otherwise pane A shows the whole list and B and C are hidden.
-const panes = ['paneA', 'paneB', 'paneC'].map(id => {
-  const el = $(id);
-  return { el, title: el.querySelector('.pane-title'), label: el.querySelector('.pane-toggle span'), toggle: el.querySelector('.pane-toggle'), head: el.querySelector('thead tr'), body: el.querySelector('tbody'),
-    empty: el.querySelector('.list-empty'), rows: new Map(), list: 'trending', rank: n => n.rank, include: () => true, breakout: false };
-});
-const splits = [...document.querySelectorAll('.pane-split')];
+// One table per list. In Panels, each panel the viewer added is a table of its own list, ranked by that list (up to
+// MAX_PANELS: the same list twice is fine, e.g. Volume over 1m next to Volume over 4h); otherwise one table shows the
+// whole list. Panels, their sizes and which are collapsed are saved with the other settings.
+const PANEL_LISTS = { trending: 'Trending', top: 'Top volume', breakout: 'Breakout', volume: 'Volume' }, MAX_PANELS = 6;
+const panelLabel = c => PANEL_LISTS[c.list] + (c.list === 'volume' ? ' · ' + c.window : '');
+function cleanPanels(v) {
+  if (!Array.isArray(v)) return null;
+  const out = v.filter(c => c && Object.hasOwn(PANEL_LISTS, c.list)).slice(0, MAX_PANELS)
+    .map(c => c.list === 'volume' ? { list: 'volume', window: VOL_WINDOWS.includes(c.window) ? c.window : '1h' } : { list: c.list });
+  return out.length ? out : null;
+}
+let panes = [], splits = [];
+let dragFrom = null; // the panel being dragged by its title
+const PANE_CHEV = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
+function makePane() {
+  const el = document.createElement('div');
+  el.className = 'list-pane';
+  el.innerHTML = '<div class="pane-title" hidden><button type="button" class="pane-toggle" aria-expanded="true">' + PANE_CHEV + '<span></span></button><span class="pane-tools"></span></div>' +
+    '<div class="list-scroll"><table class="pools"><thead><tr></tr></thead><tbody></tbody></table>' +
+    '<div class="empty list-empty" hidden>No pools match. Clear the search or untick Genuine only.</div></div>';
+  const p = { el, title: el.querySelector('.pane-title'), label: el.querySelector('.pane-toggle span'), toggle: el.querySelector('.pane-toggle'), tools: el.querySelector('.pane-tools'),
+    head: el.querySelector('thead tr'), body: el.querySelector('tbody'), empty: el.querySelector('.list-empty'), rows: new Map(),
+    i: 0, list: 'trending', window: null, rank: n => n.rank, include: () => true, breakout: false };
+  p.toggle.addEventListener('click', () => { if (state.list === 'both') togglePane(p.i); });
+  // a Volume panel's window (its dropdown), and removing a panel
+  p.tools.addEventListener('change', e => { if (e.target.matches('.pane-win')) setPanelWindow(p.i, e.target.value); });
+  p.tools.addEventListener('click', e => { if (e.target.closest('[data-close]')) removePanel(p.i); });
+  // from the keyboard: Alt + arrow on a panel's title moves it
+  p.toggle.addEventListener('keydown', e => {
+    const d = e.altKey && ({ ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 })[e.key];
+    if (!d || state.list !== 'both') return;
+    e.preventDefault();
+    const to = p.i + d;
+    if (to < 0 || to >= state.panels.length) return;
+    movePanel(p.i, to); panes[to].toggle.focus();
+  });
+  // drag a panel by its title onto another to move it there
+  p.title.addEventListener('dragstart', e => {
+    if (e.target.closest('select, button:not(.pane-toggle)')) return e.preventDefault();
+    dragFrom = p.i; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(p.i));
+    p.el.classList.add('dragging');
+  });
+  p.title.addEventListener('dragend', () => { dragFrom = null; for (const q of panes) q.el.classList.remove('dragging', 'drop-before', 'drop-after'); });
+  p.el.addEventListener('dragover', e => {
+    if (dragFrom == null || dragFrom === p.i) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+    for (const q of panes) if (q !== p) q.el.classList.remove('drop-before', 'drop-after');
+    p.el.classList.toggle('drop-before', p.i < dragFrom); p.el.classList.toggle('drop-after', p.i > dragFrom);
+  });
+  p.el.addEventListener('dragleave', e => { if (!p.el.contains(e.relatedTarget)) p.el.classList.remove('drop-before', 'drop-after'); });
+  p.el.addEventListener('drop', e => {
+    if (dragFrom == null || dragFrom === p.i) return;
+    e.preventDefault(); movePanel(dragFrom, p.i);
+  });
+  wireHead(p);
+  return p;
+}
+// the handle between panes i and i + 1
+function makeSplit(i) {
+  const sp = document.createElement('div');
+  sp.className = 'pane-split'; sp.hidden = true; sp.tabIndex = 0;
+  for (const [k, v] of Object.entries({ role: 'separator', 'aria-orientation': 'vertical', 'aria-valuemin': '10', 'aria-valuemax': '90', 'aria-label': 'Resize lists (double-click to even them out)' })) sp.setAttribute(k, v);
+  sp.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const stacked = stackedPanes(), view = $('listView');
+    // what each pixel is worth: the open lists' total size, without the handles and collapsed strips
+    const total = panes.reduce((t, p, j) => t + (collapsed(j) ? 0 : stacked ? p.el.offsetHeight : p.el.offsetWidth), 0) || 1;
+    let last = stacked ? e.clientY : e.clientX;
+    sp.setPointerCapture(e.pointerId); sp.classList.add('dragging'); view.classList.add('resizing');
+    const move = ev => { const at = stacked ? ev.clientY : ev.clientX; movePaneSplit(i, (at - last) / total); last = at; };
+    const up = () => {
+      sp.removeEventListener('pointermove', move); sp.removeEventListener('pointerup', up); sp.removeEventListener('pointercancel', up);
+      sp.classList.remove('dragging'); view.classList.remove('resizing'); saveSettings();
+    };
+    sp.addEventListener('pointermove', move); sp.addEventListener('pointerup', up); sp.addEventListener('pointercancel', up);
+  });
+  sp.addEventListener('keydown', e => {
+    const keys = stackedPanes() ? { ArrowUp: -1, ArrowDown: 1 } : { ArrowLeft: -1, ArrowRight: 1 };
+    if (!keys[e.key]) return;
+    e.preventDefault(); movePaneSplit(i, keys[e.key] * 0.02); saveSettings();
+  });
+  // double-click: even the panes out again
+  sp.addEventListener('dblclick', () => { state.paneSizes = null; applyPaneSizes(); saveSettings(); });
+  return sp;
+}
+// build the tables, and the handles between them, when their number changes
+function ensurePanes(count) {
+  if (panes.length === count) return;
+  for (const p of panes) p.el.remove();
+  for (const sp of splits) sp.remove();
+  panes = []; splits = [];
+  const view = $('listView');
+  for (let i = 0; i < count; i++) {
+    if (i) { const sp = makeSplit(i - 1); splits.push(sp); view.appendChild(sp); }
+    const p = makePane(); p.i = i; panes.push(p); view.appendChild(p.el);
+  }
+  colsKey = ''; // the next render builds the new tables' headers
+}
 // each list keeps its own sort, saved with the other settings; by rank until the viewer picks a column
 const DEFAULT_SORT = { key: 'rank', dir: 1 };
 const sortOf = p => state.sorts[p.list] || DEFAULT_SORT;
 function setupPanes() {
-  const both = state.list === 'both', [a, b, c] = panes;
-  b.el.hidden = c.el.hidden = !both; a.title.hidden = !both;
-  a.rank = both ? n => n.rankT : n => n.rank;
-  a.include = both ? n => n.rankT != null : () => true;
-  a.breakout = state.list === 'breakout';
-  // the list each pane shows: its sort is that list's own (the Trending pane in Both shares the Trending tab's)
-  a.list = both ? 'trending' : state.list; b.list = 'top'; c.list = 'breakout';
-  b.rank = n => n.rankV; b.include = n => n.rankV != null;
-  c.rank = n => n.rankB; c.include = n => n.rankB != null; c.breakout = true;
-  setT(a.label, 'Trending'); setT(b.label, 'Top volume'); setT(c.label, 'Breakout');
-  if (!both) for (const p of [b, c]) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); }
+  const both = state.list === 'both';
+  ensurePanes(both ? state.panels.length : 1);
+  panes.forEach((p, i) => {
+    const c = both ? state.panels[i] : { list: state.list, window: state.volWindow };
+    p.title.hidden = !both;
+    // the list each pane shows: its sort is that list's own (a Trending panel shares the Trending tab's)
+    p.list = c.list; p.window = c.list === 'volume' ? c.window : null; p.breakout = c.list === 'breakout';
+    p.rank = both ? n => n.ranks?.[i] ?? null : n => n.rank;
+    p.include = both ? n => n.ranks?.[i] != null : () => true;
+    if (!both) return;
+    // a Volume panel names its window in its dropdown, so the title stays short enough for a narrow pane
+    setT(p.label, PANEL_LISTS[c.list]);
+    p.title.draggable = state.panels.length > 1;
+    p.title.title = state.panels.length > 1 ? 'Drag to move this panel (or Alt + arrow keys)' : '';
+    setH(p.tools, (c.list === 'volume' ? '<select class="pane-win" aria-label="Volume panel window" title="Change this panel’s window">' +
+      VOL_WINDOWS.map(w => '<option value="' + w + '"' + (w === c.window ? ' selected' : '') + '>' + w + '</option>').join('') + '</select>' : '') +
+      '<button type="button" class="pane-close" data-close aria-label="Remove the ' + esc(panelLabel(c)) + ' panel" title="Remove this panel"' + (state.panels.length < 2 ? ' disabled' : '') + '>✕</button>');
+  });
   applyPaneSizes();
+  renderAddPanel();
 }
-// Pane sizes in Both: each pane's share of the width (or height, when the panes stack), saved with the other settings
+function panelsChanged() { setupPanes(); streamConfig(); rebuildList(); saveSettings(); }
+function addPanel(c) {
+  if (state.panels.length >= MAX_PANELS) return;
+  state.panels.push(c); state.paneCollapsed.push(false);
+  state.paneSizes = null; // even the panels out to make room
+  panelsChanged();
+}
+function removePanel(i) {
+  if (state.panels.length < 2) return;
+  state.panels.splice(i, 1); state.paneCollapsed.splice(i, 1);
+  if (state.paneSizes) { state.paneSizes.splice(i, 1); state.paneSizes = cleanPaneSizes(state.paneSizes); }
+  panelsChanged();
+}
+// move panel `from` to position `to`: its size and collapsed state go with it
+function movePanel(from, to) {
+  const n = state.panels.length;
+  if (from === to || from < 0 || to < 0 || from >= n || to >= n) return;
+  const order = [...Array(n).keys()];
+  order.splice(to, 0, order.splice(from, 1)[0]);
+  const move = a => order.map(k => a[k]);
+  state.panels = move(state.panels); state.paneCollapsed = move(state.paneCollapsed);
+  if (state.paneSizes) state.paneSizes = move(state.paneSizes);
+  // the coins' places follow at once, without waiting for the server's next list
+  for (const nd of nodes) if (nd.ranks) nd.ranks = move(nd.ranks);
+  panelsChanged();
+}
+function setPanelWindow(i, w) {
+  const c = state.panels[i];
+  if (!c || c.window === w) return;
+  c.window = w; panelsChanged();
+}
+// "+ Add panel" (Panels only): a list, or Volume over a window
+$('panelMenu').innerHTML = ['trending', 'top', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
+  '<div class="grp"><div class="pm-h">Volume over</div><div class="pm-wins">' +
+  VOL_WINDOWS.map(w => '<button type="button" data-add="volume" data-win="' + w + '" aria-label="Volume over ' + w + '">' + w + '</button>').join('') + '</div></div>';
+function panelMenu(open) { $('panelMenu').hidden = !open; $('addPanelBtn').setAttribute('aria-expanded', String(open)); }
+function renderAddPanel() {
+  const full = state.panels.length >= MAX_PANELS;
+  $('addPanel').hidden = state.list !== 'both';
+  $('addPanelBtn').disabled = full;
+  $('addPanelBtn').title = full ? 'Up to ' + MAX_PANELS + ' panels: remove one to add another' : 'Add a panel showing one of the lists';
+  if (full || state.list !== 'both') panelMenu(false);
+}
+$('addPanel').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.id === 'addPanelBtn') return panelMenu($('panelMenu').hidden);
+  if (!b.dataset.add) return;
+  addPanel(b.dataset.add === 'volume' ? { list: 'volume', window: b.dataset.win } : { list: b.dataset.add });
+  panelMenu(false); $('addPanelBtn').focus();
+});
+document.addEventListener('click', e => { if (!$('panelMenu').hidden && e.target.isConnected && !$('addPanel').contains(e.target)) panelMenu(false); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('panelMenu').hidden) { panelMenu(false); $('addPanelBtn').focus(); } });
+// Pane sizes in Panels: each pane's share of the width (or height, when the panes stack), saved with the other settings
 const PANE_MIN = 0.1;
 const evenPanes = () => panes.map(() => 1 / panes.length);
 function cleanPaneSizes(v) {
-  if (!Array.isArray(v) || v.length !== panes.length || !v.every(x => typeof x === 'number' && isFinite(x) && x > 0)) return null;
+  if (!Array.isArray(v) || v.length !== state.panels.length || !v.every(x => typeof x === 'number' && isFinite(x) && x > 0)) return null;
   const sum = v.reduce((t, x) => t + x, 0);
   return v.map(x => Math.max(PANE_MIN, x / sum));
 }
-// Lists collapsed in Both (by clicking their title), saved with the other settings
+// Lists collapsed in Panels (by clicking their title), saved with the other settings
 const collapsed = i => state.list === 'both' && !!state.paneCollapsed[i];
 // the two open lists a handle sits between, skipping collapsed ones; null when there is no open list on one side
 function splitPair(i) {
@@ -1581,7 +1759,6 @@ function togglePane(i) {
   state.paneCollapsed[i] = !state.paneCollapsed[i];
   applyPaneSizes(); saveSettings(); renderList();
 }
-panes.forEach((p, i) => p.toggle.addEventListener('click', () => { if (state.list === 'both') togglePane(i); }));
 // the panes sit side by side, or stack on narrow screens
 function stackedPanes() {
   const stacked = getComputedStyle($('listView')).flexDirection === 'column';
@@ -1596,35 +1773,11 @@ function movePaneSplit(i, frac) {
   s[l] = Math.min(both - PANE_MIN, Math.max(PANE_MIN, s[l] + frac * open)); s[r] = both - s[l];
   state.paneSizes = s; applyPaneSizes();
 }
-splits.forEach((sp, i) => {
-  sp.addEventListener('pointerdown', e => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const stacked = stackedPanes(), view = $('listView');
-    // what each pixel is worth: the open lists' total size, without the handles and collapsed strips
-    const total = panes.reduce((t, p, j) => t + (collapsed(j) ? 0 : stacked ? p.el.offsetHeight : p.el.offsetWidth), 0) || 1;
-    let last = stacked ? e.clientY : e.clientX;
-    sp.setPointerCapture(e.pointerId); sp.classList.add('dragging'); view.classList.add('resizing');
-    const move = ev => { const at = stacked ? ev.clientY : ev.clientX; movePaneSplit(i, (at - last) / total); last = at; };
-    const up = () => {
-      sp.removeEventListener('pointermove', move); sp.removeEventListener('pointerup', up); sp.removeEventListener('pointercancel', up);
-      sp.classList.remove('dragging'); view.classList.remove('resizing'); saveSettings();
-    };
-    sp.addEventListener('pointermove', move); sp.addEventListener('pointerup', up); sp.addEventListener('pointercancel', up);
-  });
-  sp.addEventListener('keydown', e => {
-    const keys = stackedPanes() ? { ArrowUp: -1, ArrowDown: 1 } : { ArrowLeft: -1, ArrowRight: 1 };
-    if (!keys[e.key]) return;
-    e.preventDefault(); movePaneSplit(i, keys[e.key] * 0.02); saveSettings();
-  });
-  // double-click: even the panes out again
-  sp.addEventListener('dblclick', () => { state.paneSizes = null; applyPaneSizes(); saveSettings(); });
-});
 function renderHead() {
   for (const p of panes) p.head.innerHTML = shownColumns(p).map(k => {
     const c = COLUMNS[k], s = sortOf(p);
     const sort = s.key === k ? ' aria-sort="' + (s.dir > 0 ? 'ascending' : 'descending') + '"' : '';
-    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.label) + '</button>' +
+    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.head ? c.head(p) : c.label) + '</button>' +
       '<span class="col-resize" title="Drag to resize; double-click to fit all columns again" aria-hidden="true"></span></th>';
   }).join('');
   for (const p of panes) applyColWidths(p);
@@ -1644,7 +1797,8 @@ function applyColWidths(p) {
   table.classList.toggle('sized', sized);
   table.style.width = sized ? total + 'px' : '';
 }
-for (const p of panes) {
+// a table header: drag a column's edge to resize it, click a column to sort by it
+function wireHead(p) {
   p.head.addEventListener('pointerdown', e => {
     const grip = e.target.closest('.col-resize');
     if (!grip || e.button !== 0) return;
@@ -1670,13 +1824,19 @@ for (const p of panes) {
     if (!e.target.closest('.col-resize')) return;
     state.colWidths = {}; for (const q of panes) applyColWidths(q); saveSettings();
   });
+  p.head.addEventListener('click', e => {
+    const th = e.target.closest('th'); if (!th || e.target.closest('.col-resize')) return;
+    const k = th.dataset.k, s = sortOf(p);
+    state.sorts[p.list] = { key: k, dir: s.key === k ? -s.dir : (COLUMNS[k].align === 'l' || k === 'rank' ? 1 : -1) };
+    renderHead(); renderList(); saveSettings();
+  });
 }
 function rebuildList() {
   for (const p of panes) { for (const tr of p.rows.values()) tr.remove(); p.rows.clear(); }
   renderHead(); renderList();
 }
 function sortValue(n, k, pane) {
-  const v = k === 'rank' ? pane.rank(n) ?? Infinity : (COLUMNS[k] || COLUMNS.liq).sort(n);
+  const v = k === 'rank' ? pane.rank(n) ?? Infinity : (COLUMNS[k] || COLUMNS.liq).sort(n, pane);
   return typeof v === 'number' && !isFinite(v) ? -Infinity : v;
 }
 function makeRow(cols, id) {
@@ -1726,7 +1886,7 @@ function renderPane(p, cols, now) {
   let maxLiq = 1;
   for (const n of list) if (n.liq > maxLiq) maxLiq = n.liq;
   // bar widths are relative to the largest pool; bucket it so a 0.1% wiggle doesn't repaint every bar
-  const ctx = { maxLiq: +maxLiq.toPrecision(2), now, rank: p.rank }, seen = new Set();
+  const ctx = { maxLiq: +maxLiq.toPrecision(2), now, rank: p.rank, pane: p }, seen = new Set();
   list.forEach((n, i) => {
     let tr = p.rows.get(n.id);
     if (!tr) { tr = makeRow(cols, n.id); p.rows.set(n.id, tr); }
@@ -1741,12 +1901,6 @@ function renderPane(p, cols, now) {
   const empty = list.length > 0 || !nodes.length;
   if (p.empty.hidden !== empty) p.empty.hidden = empty;
 }
-for (const p of panes) p.head.addEventListener('click', e => {
-  const th = e.target.closest('th'); if (!th || e.target.closest('.col-resize')) return;
-  const k = th.dataset.k, s = sortOf(p);
-  state.sorts[p.list] = { key: k, dir: s.key === k ? -s.dir : (COLUMNS[k].align === 'l' || k === 'rank' ? 1 : -1) };
-  renderHead(); renderList(); saveSettings();
-});
 setInterval(renderList, 250);
 
 // ---------- column editor ----------
@@ -1817,9 +1971,9 @@ const SETTINGS_KEY = 'solana-liquidity-bubbles:settings:v1';
 function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      view: state.view, list: state.list, panel: state.panel, colorBy: state.colorBy, size: state.size,
+      view: state.view, list: state.list, volWindow: state.volWindow, panel: state.panel, colorBy: state.colorBy, size: state.size,
       group: state.group, genuine: state.genuine, hidden: state.hidden, pins: state.pins, sorts: state.sorts, columns: state.columns,
-      ages: state.ages, ageFavs: state.ageFavs, ageOpen: state.ageOpen, paneSizes: state.paneSizes, paneCollapsed: state.paneCollapsed, colWidths: state.colWidths,
+      ages: state.ages, ageFavs: state.ageFavs, ageOpen: state.ageOpen, panels: state.panels, paneSizes: state.paneSizes, paneCollapsed: state.paneCollapsed, colWidths: state.colWidths,
     }));
   } catch {}
 }
@@ -1829,6 +1983,7 @@ function restoreSettings() {
   const oneOf = (v, ok, d) => ok.includes(v) ? v : d;
   state.view = oneOf(s.view, ['map', 'list'], state.view);
   state.list = oneOf(s.list, Object.keys(LISTS), state.list);
+  state.volWindow = oneOf(s.volWindow, VOL_WINDOWS, state.volWindow);
   state.colorBy = oneOf(s.colorBy, ['m5', 'h1', 'h24', 'progress', 'dex'], state.colorBy);
   state.size = oneOf(s.size, ['log', 'sqrt', 'area'], state.size);
   if (typeof s.group === 'boolean') state.group = s.group;
@@ -1845,15 +2000,16 @@ function restoreSettings() {
   if (s.ageOpen && typeof s.ageOpen === 'object') state.ageOpen = Object.fromEntries(AGE_GROUPS.map(([g]) => [g, s.ageOpen[g] !== false]));
   if (Array.isArray(s.pins)) state.pins = s.pins.map(cleanPin).filter(Boolean).slice(0, 200);
   const okSort = v => v && COLUMNS[v.key] && (v.dir === 1 || v.dir === -1) ? { key: v.key, dir: v.dir } : null;
-  const lists = ['trending', 'top', 'breakout'];
+  const lists = ['trending', 'top', 'breakout', 'volume'];
   if (s.sorts && typeof s.sorts === 'object') for (const l of lists) { const v = okSort(s.sorts[l]); if (v) state.sorts[l] = v; }
   else if (okSort(s.sort)) for (const l of lists) state.sorts[l] = okSort(s.sort); // one sort for every list, saved before sorts were per list
   state.columns = normalizeColumns(s.columns);
+  state.panels = cleanPanels(s.panels) || state.panels;
   state.paneSizes = cleanPaneSizes(s.paneSizes);
   if (s.colWidths && typeof s.colWidths === 'object') for (const [k, w] of Object.entries(s.colWidths)) {
     if (COLUMNS[k] && typeof w === 'number' && w >= COL_MIN && w <= 2000) state.colWidths[k] = Math.round(w);
   }
-  if (Array.isArray(s.paneCollapsed)) state.paneCollapsed = panes.map((_, i) => s.paneCollapsed[i] === true);
+  state.paneCollapsed = state.panels.map((_, i) => Array.isArray(s.paneCollapsed) && s.paneCollapsed[i] === true);
 }
 
 // ---------- Breakout record ----------
@@ -2174,7 +2330,9 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('ageMen
 
 function applyListUi() {
   $('boardLabel').textContent = 'Largest pools on the map';
-  $('clearVolBtn').hidden = state.list !== 'top' && state.list !== 'both';
+  $('clearVolBtn').hidden = state.list !== 'top' && state.list !== 'both' && state.list !== 'volume';
+  $('volWindowCtl').hidden = state.list !== 'volume';
+  renderAddPanel();
   $('breakoutSection').hidden = state.list !== 'breakout' && state.list !== 'both';
   renderLegend();
 }
@@ -2211,10 +2369,17 @@ function syncControls() {
   press('srcSeg', state.list); press('viewSeg', state.view); press('groupSeg', state.group ? '1' : '0');
   $('colorBy').value = state.colorBy; $('sizeMode').value = state.size;
   $('genuine').checked = state.genuine;
+  press('volWindow', state.volWindow);
 }
 // every header control change is remembered in this browser
 for (const type of ['click', 'change']) document.querySelector('header').addEventListener(type, () => setTimeout(saveSettings));
 $('genuine').addEventListener('change', e => { state.genuine = e.target.checked; streamConfig(); });
+segment('volWindow', v => {
+  if (v === state.volWindow) return;
+  state.volWindow = v;
+  streamConfig(); // the server answers with the list ranked over the new window
+  setupPanes(); renderHead(); // the table's window, and its column's label
+});
 $('sizeMode').addEventListener('change', e => { state.size = e.target.value; layoutClusters(); renderLegend(); });
 segment('groupSeg', v => { state.group = v === '1'; layoutClusters(); sim.alpha(0.8); });
 $('colorBy').addEventListener('change', e => { state.colorBy = e.target.value; renderLegend(); });

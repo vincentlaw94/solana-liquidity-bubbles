@@ -123,12 +123,19 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
-- `GET /api/pools?list=trending|top|both|breakout&limit=100&minLiq=0&genuine=true&maxAge=0`: a ranked pool list
+- `GET /api/pools?list=trending|top|both|breakout|volume&limit=100&minLiq=0&genuine=true&maxAge=0&window=1h`: a ranked pool list
   (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
-  - `both`: the union of Trending, Top volume and Breakout (up to `limit` each); every row carries `rankT`, `rankV`
-    and/or `rankB`, its place in each; Breakout coins also carry `setup` (their setup score) and `why`
+  - `volume`: by volume over `window` (`1m`, `15m`, `30m`, `1h` (default), `4h`, `12h` or `24h`), carried by each row as
+    `volW` (and as `vols: { <window>: volume }`). 1m counts the last 60 seconds of swaps; 15m to 1h add up 1-minute buckets (the current minute and those
+    before it), 4h to 24h 1-hour buckets, so a window can reach back up to a minute or an hour further. Coins with no
+    volume in the window are left out
+  - `both`: the dashboard's Panels view: the union of the lists in `panels` (up to `limit` each), by default
+    `trending,top,breakout`. Up to 6 of `trending`, `top`, `breakout` and `volume:<window>` (e.g.
+    `panels=trending,volume:1m,volume:4h`). Every row carries `ranks`, its place in each panel in order (null where it
+    isn't listed); Breakout coins also carry `setup` (their setup score) and `why`, Volume coins `vols` (their volume
+    per window)
   - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` (also as `setup`) and `why`,
     and pinned coins are added to it
 - `GET /api/bundle?mint=<mint>`: a launch's bundle report: status, shares of supply, every launch-window wallet with
@@ -146,7 +153,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   and the same for the last day under `day`) and the coins it flagged, newest first, with their market cap then (`entry`), `peak` and `hitAt`
 - `POST /api/clear-volume`: forget the 1h and 24h volume collected so far, so Top volume starts over (the 5-minute window
   is kept; 1h / 24h price changes restart too, and Trending's pace counts from the clear). Refused from other websites'
-  pages; `/api/stats` → `volumeClearedAt` says when it last ran. The dashboard's Clear volume button (Top volume and Both) calls it
+  pages; `/api/stats` → `volumeClearedAt` says when it last ran. The dashboard's Clear volume button (Top volume, Volume and Panels) calls it
 - `GET /api/pins`: pinned coins with their entry, peak, current market cap and `dead` reasons
 - `WS /ws`: the dashboard protocol (permessage-deflate compressed)
   - `pools` (up to every 0.5s, only when something changed): `order` is the ranked list of pool ids; `s` carries a
@@ -157,7 +164,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   - `stats` every 2s, `event` (launches and graduations, and the ATH watch's `drawdown` / `athReset`), `tape` (recent
     swaps of a newly opened pool), `ath` (the ATH watch, every 2s when it changed), `breakout` (the Breakout record's
     stats) and `pins` (pins as a browser saves them), each every 2s when changed
-  - client → server: `{type:"config", list, limit, minLiq, genuine, maxAge}`, `{type:"select", id}`, `{type:"pin", mint, id}`,
+  - client → server: `{type:"config", list, limit, minLiq, genuine, maxAge, window, panels}` (`panels`: `[{list, window}]`, for list `both`), `{type:"select", id}`, `{type:"pin", mint, id}`,
     `{type:"unpin", mint}`, `{type:"pins", pins}` (a browser's saved pins; the server takes back any it doesn't have)
 - `GET /api/stats` → `perf`: ranking tick time, bytes per second per client (before and after compression), memory, CPU
   - `genuine` defaults to true: flagged pools are left out unless you pass `genuine=false`
