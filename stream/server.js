@@ -28,7 +28,7 @@ import { createBackfill } from './lib/backfill.js';
 import { createSnapshot } from './lib/snapshot.js';
 import { createImageProxy } from './lib/images.js';
 import { createRpc, createFailoverRpc, patient, createAccountLoader, createLogStream, createTokenMeta, createPrices, jupiterStats } from './lib/sources.js';
-import { Market } from './lib/market.js';
+import { Market, VOL_WINDOWS } from './lib/market.js';
 import { createAthWatch } from './lib/ath.js';
 import { rankBreakout, createBreakoutTracker } from './lib/breakout.js';
 import { createPins } from './lib/pins.js';
@@ -288,11 +288,28 @@ function trendScore(r, now) {
   const buyShare = r.buys5 / Math.max(1, r.buys5 + r.sells5);
   return Math.log10(1 + r.vol5) * (1 + Math.min(3, pace)) * (0.6 + buyShare) * (1 + Math.min(1, r.traders5 / 40)) * (1 + Math.max(0, Math.min(1, r.chg5 / 50)));
 }
-// "both" is the union of Trending, Top volume and Breakout, each coin tagged with its place in each (rankT, rankV,
-// rankB; Breakout coins also carry their setup score as `setup`, and why); "breakout" ranks setups by
-// lib/breakout.js's score, and only coins passing its safety gates
-const LISTS = ['trending', 'top', 'both', 'breakout'];
+// "volume" ranks by volume over the window the viewer picked (1m to 24h); each row carries it as volW (and in vols)
+// "both" is the dashboard's Panels view: the union of the lists in `panels` (by default Trending, Top volume and
+// Breakout), each coin tagged with its place in each as `ranks` (one entry per panel, null where it isn't listed).
+// Breakout coins also carry their setup score as `setup`, and why; Volume coins their volume per window as `vols`.
+// "breakout" ranks setups by lib/breakout.js's score, and only coins passing its safety gates
+const LISTS = ['trending', 'top', 'both', 'breakout', 'volume'];
+const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume'], MAX_PANELS = 6;
+const DEFAULT_PANELS = [{ list: 'trending' }, { list: 'top' }, { list: 'breakout' }];
+// panels as the dashboard sends them ([{ list, window }]) or as a query string ("trending,top,volume:15m")
+function readPanels(v) {
+  const raw = typeof v === 'string' ? v.split(',').map(s => { const [list, window] = s.split(':'); return { list, window }; }) : v;
+  if (!Array.isArray(raw)) return DEFAULT_PANELS;
+  const out = raw.filter(p => PANEL_LISTS.includes(p?.list)).slice(0, MAX_PANELS)
+    .map(p => p.list === 'volume' ? { list: 'volume', window: Object.hasOwn(VOL_WINDOWS, p.window) ? p.window : '1h' } : { list: p.list });
+  return out.length ? out : DEFAULT_PANELS;
+}
 const rankTop = (eligible, limit) => eligible.slice().sort((a, b) => b.vol24 - a.vol24 || b.vol5 - a.vol5).slice(0, limit);
+function rankVolume(eligible, limit, win, now) {
+  const out = [];
+  for (const r of eligible) { const v = market.volumeIn(r.id, win, now); if (v > 0) out.push({ ...r, volW: v, vols: { [win]: v } }); }
+  return out.sort((a, b) => b.volW - a.volW).slice(0, limit);
+}
 function rankTrending(eligible, limit, now) {
   // require real activity and liquidity, otherwise one $5 trade on a dust pool "trends"
   return eligible.filter(r => r.buys5 + r.sells5 >= 8 && r.liq >= 500)
@@ -305,19 +322,25 @@ function pick(rows, cfg) {
     (!cfg.maxAge || (r.born && now - r.born <= cfg.maxAge))); // coin age filter: coins of unknown age are left out
   if (cfg.list === 'top') return rankTop(eligible, cfg.limit);
   if (cfg.list === 'breakout') return rankBreakout(eligible, cfg.limit, Date.now());
-  const trending = rankTrending(eligible, cfg.limit, Date.now());
-  if (cfg.list === 'trending') return trending;
-  const out = new Map();
-  trending.forEach((r, i) => out.set(r.id, { ...r, rankT: i + 1 }));
-  rankTop(eligible, cfg.limit).forEach((r, i) => {
-    const o = out.get(r.id);
-    if (o) o.rankV = i + 1; else out.set(r.id, { ...r, rankV: i + 1 });
-  });
-  rankBreakout(eligible, cfg.limit, now).forEach((r, i) => {
-    const o = out.get(r.id);
-    // `score` stays the trend score: Breakout's own score travels as `setup`
-    if (o) Object.assign(o, { rankB: i + 1, setup: r.setup, why: r.why }); else out.set(r.id, { ...r, score: null, rankB: i + 1 });
-  });
+  if (cfg.list === 'volume') return rankVolume(eligible, cfg.limit, cfg.window, now);
+  if (cfg.list === 'trending') return rankTrending(eligible, cfg.limit, now);
+  // Panels: each panel's list (the same list twice, e.g. two Volume panels with one window, is ranked once)
+  const ranked = new Map(), out = new Map(), n = cfg.panels.length;
+  const rank = p => {
+    const k = p.list + ':' + (p.window || '');
+    if (!ranked.has(k)) ranked.set(k, p.list === 'top' ? rankTop(eligible, cfg.limit) : p.list === 'breakout' ? rankBreakout(eligible, cfg.limit, now) :
+      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : rankTrending(eligible, cfg.limit, now));
+    return ranked.get(k);
+  };
+  cfg.panels.forEach((p, i) => rank(p).forEach((r, j) => {
+    let o = out.get(r.id);
+    // `score` is the trend score: Breakout's own score travels as `setup`
+    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, volW: null, vols: null, ranks: new Array(n).fill(null) });
+    o.ranks[i] = j + 1;
+    if (p.list === 'trending') o.score = r.score;
+    else if (p.list === 'breakout') Object.assign(o, { setup: r.setup, why: r.why });
+    else if (p.list === 'volume') o.vols = { ...o.vols, [p.window]: r.volW };
+  }));
   return [...out.values()];
 }
 function readConfig(m) {
@@ -329,6 +352,8 @@ function readConfig(m) {
     minLiq: Math.max(0, +m.minLiq || 0),
     maxAge: Math.max(0, Math.min(365 * 86400e3, +m.maxAge || 0)), // ms; 0 = any age
     venues: Array.isArray(m.venues) && m.venues.length ? m.venues.map(String) : null,
+    window: Object.hasOwn(VOL_WINDOWS, m.window) ? m.window : '1h', // the volume list's window
+    panels: readPanels(m.panels), // the Panels view's lists (list "both")
   };
 }
 
@@ -416,9 +441,9 @@ let latestRows = [];
 // its live fields are re-sent only when one of them changed since that client last received them.
 const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'born', 'created', 'firstSeen', 'deployer', 'links'];
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
-  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'rankT', 'rankV', 'rankB', 'setup',
+  'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
-  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales'];
+  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -459,7 +484,8 @@ function snapshotFor(c, pools, reset) {
 let pickCache = new Map();
 // pinned coins are added to the Breakout list (whatever its filters) unless they're already on it
 function pickShared(cfg, selected) {
-  const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + cfg.maxAge + '|' + (cfg.venues || '');
+  const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + cfg.maxAge + '|' + (cfg.venues || '') + '|' + (cfg.list === 'volume' ? cfg.window : '') +
+    '|' + (cfg.list === 'both' ? cfg.panels.map(p => p.list + ':' + (p.window || '')).join() : '');
   let base = pickCache.get(key);
   if (!base) pickCache.set(key, base = pick(latestRows, cfg));
   let out = base;

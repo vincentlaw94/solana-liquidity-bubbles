@@ -3,7 +3,7 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): Trending, Top volume, Breakout, or Both (all three side by side, in panes you can resize by dragging the lines between them or collapse by clicking their title), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
+- **List view** (default): Trending, Top volume, Breakout, Volume, or Panels (lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list, up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.
@@ -38,7 +38,8 @@ chain logs. There's no third-party market-data API in between.
   The server follows pins with the browser closed, and your browser keeps a copy that restores them.
 - **Coin age filter**: show only coins younger than a chosen age, from 15 seconds to 30 days. Each list keeps its
   own age. Favourite ages sit as buttons next to All; star more in the dropdown.
-- **Clear volume**: on Top volume and Both, a button starts the server's 1h and 24h volume over from now (for
+- **Volume list**: coins ranked by their volume over a window you pick: 1m, 15m, 30m, 1h, 4h, 12h or 24h.
+- **Clear volume**: on Top volume, Volume and Panels, a button starts the server's 1h and 24h volume over from now (for
   every dashboard using it); the side panel then shows volume since the clear.
 - **Your settings**: hide coins, copy contract addresses, choose and reorder columns, the age filter and its
   favourites. All of it is saved in your browser.

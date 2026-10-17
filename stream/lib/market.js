@@ -5,6 +5,9 @@ const W5 = 5 * 60e3;
 const PUMP_INITIAL_REAL_TOKENS = 793_100_000e6; // pump.fun curve sells 793.1M tokens (6 decimals) before graduating
 const PUMP_SUPPLY = 1_000_000_000;               // every pump.fun token mints exactly 1B
 const TAPE = 40;
+// Volume list windows: 1m from the swaps themselves; up to 1h from 1-minute buckets (the current minute plus the
+// ones before it); 4h to 24h from 1-hour buckets the same way
+export const VOL_WINDOWS = { '1m': { ms: 60e3 }, '15m': { mins: 15 }, '30m': { mins: 30 }, '1h': { mins: 60 }, '4h': { hours: 4 }, '12h': { hours: 12 }, '24h': { hours: 24 } };
 
 // "Genuine trading" checks. A pool failing any of them is flagged and hidden by default.
 const GENUINE = {
@@ -245,6 +248,17 @@ export class Market {
     if (!p.mins.length) p.vol60 = 0;
     while (p.hours.length && p.hours[0].h < hourNow - 23) p.vol24 -= p.hours.shift().q;
     if (!p.hours.length) p.vol24 = 0;
+  }
+
+  // a pool's volume over one of VOL_WINDOWS, in USD (null when its quote token has no price)
+  volumeIn(id, win, now = Date.now()) {
+    const p = this.pools.get(id), w = VOL_WINDOWS[win], qUsd = p && this.prices.get(p.quoteMint);
+    if (!w || !qUsd) return null;
+    let q = 0;
+    if (w.ms) { for (let i = p.w5.length - 1; i >= p.w5h && p.w5[i].t >= now - w.ms; i--) q += p.w5[i].q; }
+    else if (w.mins) { const from = Math.floor(now / 60e3) - w.mins; for (const b of p.mins) if (b.m > from) q += b.q; }
+    else { const from = Math.floor(now / 3600e3) - w.hours; for (const b of p.hours) if (b.h > from) q += b.q; }
+    return Math.max(0, q) * qUsd;
   }
 
   venue(p) {
