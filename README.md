@@ -41,7 +41,7 @@ chain logs. There's no third-party market-data API in between.
 - **Volume list**: coins ranked by their volume over a window you pick: 1m, 15m, 30m, 1h, 4h, 12h or 24h.
 - **Clear volume**: on Top volume, Volume and Panels, a button starts the server's 1h and 24h volume over from now (for
   every dashboard using it); the side panel then shows volume since the clear.
-- **Your settings**: hide coins, copy contract addresses, choose and reorder columns, the age filter and its
+- **Your settings**: hide coins, copy contract addresses, choose and reorder columns (in the Columns editor, or by dragging a column header onto another), the age filter and its
   favourites. All of it is saved in your browser.
 
 ## Run it

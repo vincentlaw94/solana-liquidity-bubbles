@@ -308,6 +308,10 @@ table.pools th[aria-sort] button { color: var(--fg); }
 table.pools th[aria-sort="descending"] button::after { content: " ↓"; color: var(--accent); }
 table.pools th[aria-sort="ascending"] button::after { content: " ↑"; color: var(--accent); }
 table.pools th.l, table.pools td.l { text-align: left; }
+/* dragging a column header onto another moves the column there */
+table.pools th.dragging { opacity: .45; }
+table.pools th.drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+table.pools th.drop-after { box-shadow: inset -3px 0 0 var(--accent); }
 /* column widths dragged by the viewer: the table then lays out from the header, and long cells are cut short */
 table.pools.sized { table-layout: fixed; min-width: 0; }
 table.pools.sized th button, table.pools.sized td { overflow: hidden; text-overflow: ellipsis; }
@@ -353,6 +357,13 @@ a.tl svg { width: 13px; height: 13px; }
 .mini > div { height: 100%; }
 .mini.split { background: var(--sell); }
 .mini.split > div { background: var(--buy); }
+.mini.narrow { width: 28px; flex: none; } /* Vol: the buy/sell bar in front of the volume */
+.volbs { display: inline-flex; align-items: center; gap: 6px; }
+.volbs .bs { display: grid; gap: 2px; justify-items: center; }
+.volbs .bs small { font-size: 10px; line-height: 1; font-variant-numeric: tabular-nums; color: var(--muted); }
+.volbs .bs small.up { color: var(--buy); } .volbs .bs small.down { color: var(--sell); }
+.mini > span { display: block; height: 100%; }
+.mini.split > span { background: var(--buy); }
 .list-empty { padding: 24px 16px; }
 .pool-head h2 { display: flex; align-items: center; gap: 10px; }
 .pool-head h2 .logo, .pool-head h2 .badge { width: 34px; height: 34px; }
@@ -598,8 +609,8 @@ const realImage = url => url && /^https?:/.test(url) && !/missing/i.test(url) ? 
 function fromStream(r, i) {
   return {
     // ranks: place in each panel of Panels (null where not listed); setup: Breakout's score; vols: volume per window
-    // (the Volume list's, or each Volume panel's)
-    id: r.id, rank: i + 1, ranks: r.ranks || null, vols: r.vols || null, setup: r.setup ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
+    // (the Volume list's, or each Volume panel's); bs: [buys, sells] per window
+    id: r.id, rank: i + 1, ranks: r.ranks || null, vols: r.vols || null, bs: r.bs || null, setup: r.setup ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
     vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg:{ m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
     buys5: r.buys5, sells5: r.sells5, price: r.price, mcap: r.mcap || 0, flags: r.flags || [],
     created: r.created || 0, born: r.born || 0, firstSeen: r.firstSeen, progress: r.progress, graduated: r.graduated,
@@ -1353,6 +1364,9 @@ setInterval(() => {
 // so rows (and their logo images) survive the 4x/second refresh.
 const mcapOf = n => n.mcap || NaN;
 const volOf = (n, p) => n.vols?.[p?.window] ?? null; // volume over a pane's window (Volume list, Volume panels)
+const bsOf = (n, p) => n.bs?.[p?.window] || null;     // [buys, sells] over it
+// buys per sell (1e9: only buys)
+const bsRatio = bs => !bs || !(bs[0] + bs[1]) ? null : bs[1] ? bs[0] / bs[1] : 1e9;
 const athDrop = (mcap, ath) => Math.min(0, (mcap / ath - 1) * 100); // % below the high
 const barCell = color => '<div class="cellbar"><span></span><div class="mini"><div' + (color ? ' style="background:' + color + '"' : '') + '></div></div></div>';
 // show a value and tint it green/red for a moment when it moves
@@ -1427,8 +1441,24 @@ const COLUMNS = {
   vol1: { label: 'Vol 1h', sort: n => n.vol1, set: (td, n) => { setT(td, usd(n.vol1)); } },
   vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { setT(td, usd(n.vol24)); } },
   // the Volume list's window, whichever the viewer picked
-  volW: { label: 'Vol (window)', head: p => 'Vol ' + p.window, sort: (n, p) => volOf(n, p) ?? -Infinity,
-    set: (td, n, ctx) => { const v = volOf(n, ctx.pane); setT(td, v != null ? usd(v) : '–'); } },
+  // volume over the pane's window, with a buy/sell split bar in front of it (green: buys) and buys per sell above the
+  // bar; the counts on hover
+  volW: { label: 'Vol (window)', head: () => 'Vol', tip: p => 'Volume in the last ' + p.window + ', after a bar of its buys (green) and sells',
+    sort: (n, p) => volOf(n, p) ?? -Infinity,
+    init: td => {
+      td.innerHTML = '<span class="volbs"><span class="bs"><small></small><span class="mini split narrow"><span></span></span></span><span></span></span>';
+      td._bs = td.querySelector('.bs'); td._ratio = td.querySelector('small'); td._bar = td.querySelector('.mini > span'); td._val = td._bs.nextElementSibling;
+    },
+    set: (td, n, ctx) => {
+      const v = volOf(n, ctx.pane), bs = bsOf(n, ctx.pane), tx = bs ? bs[0] + bs[1] : 0, r = bsRatio(bs);
+      setT(td._val, v != null ? usd(v) : '–');
+      setS(td._bs, 'visibility', tx ? 'visible' : 'hidden');
+      // buys per sell above the bar: green above 1, red below, ∞ when there were only buys
+      setT(td._ratio, !tx ? '' : r >= 1e9 ? '∞' : r.toFixed(2)); setC(td._ratio, !tx ? '' : r > 1 ? 'up' : r < 1 ? 'down' : '');
+      setS(td._bar, 'width', (tx ? 100 * bs[0] / tx : 50).toFixed(1) + '%');
+      const t = tx ? bs[0].toLocaleString() + ' buys / ' + bs[1].toLocaleString() + ' sells in the last ' + ctx.pane.window + ' (' + (r >= 1e9 ? 'only buys' : r.toFixed(2) + ' buys per sell') + ')' : '';
+      if (td.title !== t) td.title = t;
+    } },
   traders: { label: 'Traders 5m', sort: n => n.traders5 || 0, set: (td, n) => { setT(td, n.traders5 ? String(n.traders5) : '–'); } },
   score: { label: 'Trend score', sort: n => n.score ?? -Infinity, set: (td, n) => { setT(td, n.score != null ? n.score.toFixed(1) : '–'); } },
   // Breakout list: setup score (0-100) and the reasons behind it
@@ -1534,10 +1564,11 @@ function normalizeColumns(saved) {
 state.columns = normalizeColumns(null);
 // the Breakout list (and its panels) always shows its own columns, right after the token; Volume its window's volume
 const BREAKOUT_COLUMNS = ['setup', 'sinceFlag'];
+const VOLUME_COLUMNS = ['volW']; // the window's volume, with its buys and sells
 // and "Since pinned" while any coin is pinned
 const shownColumns = pane => {
   const cols = state.columns.filter(c => c.on).map(c => c.key);
-  const extra = pane.breakout ? BREAKOUT_COLUMNS.filter(k => !cols.includes(k)) : pane.list === 'volume' && !cols.includes('volW') ? ['volW'] : [];
+  const extra = (pane.breakout ? BREAKOUT_COLUMNS : pane.list === 'volume' ? VOLUME_COLUMNS : []).filter(k => !cols.includes(k));
   if (pinsShown() && !cols.includes('sincePin') && nodes.some(n => n.pin)) extra.unshift('sincePin');
   cols.splice(cols.indexOf('token') + 1, 0, ...extra);
   return cols;
@@ -1773,11 +1804,16 @@ function movePaneSplit(i, frac) {
   s[l] = Math.min(both - PANE_MIN, Math.max(PANE_MIN, s[l] + frac * open)); s[r] = both - s[l];
   state.paneSizes = s; applyPaneSizes();
 }
+// a column the viewer chose (not one a list adds by itself, like Breakout's) can be dragged to a new place
+const movableCol = k => !!state.columns.find(c => c.key === k)?.on;
+let colDrag = null; // the column being dragged by its header
 function renderHead() {
   for (const p of panes) p.head.innerHTML = shownColumns(p).map(k => {
     const c = COLUMNS[k], s = sortOf(p);
     const sort = s.key === k ? ' aria-sort="' + (s.dir > 0 ? 'ascending' : 'descending') + '"' : '';
-    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + '><button type="button">' + esc(c.head ? c.head(p) : c.label) + '</button>' +
+    // short headers (Vol, B/S) name their window in their tooltip
+    const drag = movableCol(k) ? ' draggable="true" title="Drag to move this column"' : c.tip ? ' title="' + esc(c.tip(p)) + '"' : '';
+    return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + drag + '><button type="button">' + esc(c.head ? c.head(p) : c.label) + '</button>' +
       '<span class="col-resize" title="Drag to resize; double-click to fit all columns again" aria-hidden="true"></span></th>';
   }).join('');
   for (const p of panes) applyColWidths(p);
@@ -1799,6 +1835,30 @@ function applyColWidths(p) {
 }
 // a table header: drag a column's edge to resize it, click a column to sort by it
 function wireHead(p) {
+  // drag a header onto another to move its column there (in every list); the resize grip and sort click still work
+  const clearDrop = () => { for (const q of panes) for (const th of q.head.children) th.classList.remove('drop-before', 'drop-after'); };
+  p.head.addEventListener('pointerdown', e => { p.gripDown = !!e.target.closest('.col-resize'); }, true);
+  p.head.addEventListener('dragstart', e => {
+    const th = e.target.closest('th[draggable="true"]');
+    if (!th || p.gripDown) return e.preventDefault();
+    colDrag = th.dataset.k; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', colDrag);
+    th.classList.add('dragging');
+  });
+  p.head.addEventListener('dragover', e => {
+    const th = e.target.closest('th[data-k]');
+    if (!colDrag || !th || th.dataset.k === colDrag || !movableCol(th.dataset.k)) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+    const r = th.getBoundingClientRect(), after = e.clientX > r.left + r.width / 2;
+    clearDrop(); th.classList.add(after ? 'drop-after' : 'drop-before');
+  });
+  p.head.addEventListener('drop', e => {
+    const th = e.target.closest('th[data-k]');
+    if (!colDrag || !th || th.dataset.k === colDrag || !movableCol(th.dataset.k)) return;
+    e.preventDefault();
+    const to = state.columns.findIndex(c => c.key === th.dataset.k) + (th.classList.contains('drop-after') ? 1 : 0);
+    moveColumn(colDrag, to); colDrag = null; columnsChanged();
+  });
+  p.head.addEventListener('dragend', () => { colDrag = null; clearDrop(); for (const q of panes) for (const th of q.head.children) th.classList.remove('dragging'); });
   p.head.addEventListener('pointerdown', e => {
     const grip = e.target.closest('.col-resize');
     if (!grip || e.button !== 0) return;

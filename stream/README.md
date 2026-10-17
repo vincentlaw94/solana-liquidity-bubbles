@@ -128,14 +128,14 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `top`: by 24h volume
   - `volume`: by volume over `window` (`1m`, `15m`, `30m`, `1h` (default), `4h`, `12h` or `24h`), carried by each row as
-    `volW` (and as `vols: { <window>: volume }`). 1m counts the last 60 seconds of swaps; 15m to 1h add up 1-minute buckets (the current minute and those
+    `volW` (and as `vols: { <window>: volume }`), and its buys and sells over the window as `bs: { <window>: [buys, sells] }`. 1m counts the last 60 seconds of swaps; 15m to 1h add up 1-minute buckets (the current minute and those
     before it), 4h to 24h 1-hour buckets, so a window can reach back up to a minute or an hour further. Coins with no
     volume in the window are left out
   - `both`: the dashboard's Panels view: the union of the lists in `panels` (up to `limit` each), by default
     `trending,top,breakout`. Up to 6 of `trending`, `top`, `breakout` and `volume:<window>` (e.g.
     `panels=trending,volume:1m,volume:4h`). Every row carries `ranks`, its place in each panel in order (null where it
     isn't listed); Breakout coins also carry `setup` (their setup score) and `why`, Volume coins `vols` (their volume
-    per window)
+    per window) and `bs` (buys and sells per window)
   - `breakout`: coins passing the Breakout gates, by setup score (see Breakout list); rows carry `score` (also as `setup`) and `why`,
     and pinned coins are added to it
 - `GET /api/bundle?mint=<mint>`: a launch's bundle report: status, shares of supply, every launch-window wallet with
