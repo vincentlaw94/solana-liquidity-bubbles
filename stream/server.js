@@ -542,8 +542,8 @@ function pushPools(c, reset) {
   const msg = snapshotFor(c, pools, reset);
   if (msg) sendTo(c, 'pools', msg);
 }
-// coins on any list that still have no image: look them up again every minute
-setInterval(() => { for (const r of latestRows) if (!r.icon) meta.request(r.mint); }, 15000);
+// coins still missing a name or an image: look them up again (every minute at most, see createTokenMeta)
+setInterval(() => { for (const r of latestRows) if (!r.icon || !r.name) meta.request(r.mint); }, 15000);
 // holder counts for coins clients are looking at: refreshed every minute. Their launches also go first in
 // the bundle detector's queue, and only they are worth a full getBlock when Jito doesn't answer.
 setInterval(() => {

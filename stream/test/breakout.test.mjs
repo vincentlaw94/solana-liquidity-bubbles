@@ -7,7 +7,7 @@ const NOW = 10 * 3600e3;
 const row = (over = {}) => ({
   id: 'pump:A', mint: 'A', sym: 'A', program: 'pump', genuine: true, deployerBundler: false, ddAt: null,
   liq: 12_000, mcap: 40_000, buys5: 40, sells5: 15, traders5: 35, vol5: 9_000, vol60: 12_000, firstSeen: NOW - 3600e3,
-  chg5: 12, chg60: 60, progress: 82, graduated: false, bundledPct: 4, bundleHeldPct: 1, ...over,
+  chg5: 12, chg60: 60, progress: 0.82, graduated: false, bundledPct: 4, bundleHeldPct: 1, ...over,
 });
 
 test('a healthy small cap with buyers and rising volume scores, with reasons', () => {
@@ -124,4 +124,11 @@ test('the record is saved to its own file and loaded on start', async () => {
   assert.equal(b.get('A').entry, 40_000);
   assert.equal(b.get('A').hitAt, 2000);
   assert.equal(b.isListed('A'), false);
+});
+
+test('curve progress (0-1 on rows) scores a coin well along its curve above one just launched', () => {
+  const far = breakoutScore(row({ progress: 0.82 }), NOW), fresh = breakoutScore(row({ progress: 0.05 }), NOW);
+  assert.ok(far.score > fresh.score, far.score + ' vs ' + fresh.score);
+  assert.ok(far.why.includes('82% to graduation'));
+  assert.ok(!fresh.why.some(w => w.includes('to graduation')));
 });
