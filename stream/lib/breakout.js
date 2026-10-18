@@ -39,6 +39,7 @@ export function breakoutScore(r, now = Date.now(), g = GATES) {
   if (buyShare < g.minBuyShare) return null;
 
   const minutes = Math.min(60, Math.max(5, (now - (r.volSince ?? r.firstSeen)) / 60e3));
+  const curvePct = r.progress == null ? null : r.progress * 100; // rows carry curve progress as 0-1
   const avg5 = r.vol60 / (minutes / 5);
   const pace = avg5 > 0 ? r.vol5 / avg5 : 1;
   const parts = {
@@ -47,7 +48,7 @@ export function breakoutScore(r, now = Date.now(), g = GATES) {
     pace: clamp01((pace - 1) / 3),                      // own average -> 0, 4x it -> 1
     breadth: namesTraders ? clamp01(r.traders5 / 40) : 0.5,
     depth: clamp01(r.liq / r.mcap / 0.25),              // liquidity a quarter of market cap or more -> 1
-    curve: r.graduated || r.progress == null ? 0.3 : r.progress >= 40 && r.progress < 100 ? 0.4 + 0.6 * (r.progress - 40) / 60 : 0.2,
+    curve: r.graduated || curvePct == null ? 0.3 : curvePct >= 40 && curvePct < 100 ? 0.4 + 0.6 * (curvePct - 40) / 60 : 0.2,
   };
   const weights = { headroom: 0.25, buyers: 0.2, pace: 0.2, breadth: 0.15, depth: 0.1, curve: 0.1 };
   let score = 0;
@@ -61,7 +62,7 @@ export function breakoutScore(r, now = Date.now(), g = GATES) {
   if (parts.buyers >= 0.5) why.push(Math.round(buyShare * 100) + '% buys');
   if (pace >= 2) why.push('volume ' + pace.toFixed(1) + '× its hour');
   if (namesTraders && r.traders5 >= 25) why.push(r.traders5 + ' traders');
-  if (!r.graduated && r.progress >= 70 && r.progress < 100) why.push(Math.round(r.progress) + '% to graduation');
+  if (!r.graduated && curvePct >= 70 && curvePct < 100) why.push(Math.round(curvePct) + '% to graduation');
   if (parts.depth >= 0.8) why.push('deep pool');
   return { score, why };
 }

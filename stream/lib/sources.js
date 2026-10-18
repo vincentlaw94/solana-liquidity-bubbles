@@ -217,7 +217,8 @@ const jupiter = (() => {
     next = slot + 1500;
     if (slot > Date.now()) await sleep(slot - Date.now());
     stats.calls++;
-    const res = await fetch(url);
+    // a request that never answers must not stall every lookup behind it (the token queue waits on each one)
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) }).catch(e => { stats.timeouts = (stats.timeouts || 0) + 1; throw e; });
     if (res.status === 429) { stats.limited++; pausedUntil = Date.now() + 30000; throw new Error('rate limited'); }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.json();
@@ -228,11 +229,14 @@ export const jupiterStats = jupiter.stats;
 
 // Token symbol/name/icon/launchpad/creation time from Jupiter's token index (100 mints per request), with
 // the coin's own metadata (its launch event, or the link stored on-chain in its mint) as the image fallback.
-// Coins still missing an image are looked up again every minute (the first retry after 20s).
+// Coins still missing a name or an image are looked up again every minute (the first retry after 20s).
 // The same metadata file carries the links the creator set (X, website, Telegram): read once per listed coin.
+// Coins on someone's list go first (`hot`); the rest wait in `queue`, which keeps only its newest QUEUE_MAX so a
+// rate-limited Jupiter never leaves a listed coin stuck behind thousands of coins nobody is looking at.
 const IMAGE_RETRY = [20e3, 60e3];
+const QUEUE_MAX = 2000;
 export function createTokenMeta({ metadata, onchainUri } = {}) {
-  const meta = new Map(), queue = new Set();
+  const meta = new Map(), queue = new Set(), hot = new Set();
   const next = new Map(); // mint -> { n, at }: when it may be looked up again
   const statsAt = new Map(); // mint -> last holder-count refresh
   const uris = new Map(); // mint -> metadata URI from its launch event
@@ -263,10 +267,12 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
   }
 
   setInterval(async () => {
-    if (running || !queue.size || jupiter.busy() > 0) return;
+    if (running || !(hot.size + queue.size) || jupiter.busy() > 0) return;
     running = true;
-    const ids = [...queue].slice(0, 100);
-    ids.forEach(id => queue.delete(id));
+    const ids = [...hot].slice(0, 100);
+    if (ids.length < 100) for (const id of queue) { if (ids.length >= 100) break; if (!hot.has(id)) ids.push(id); }
+    const wasHot = new Set(ids.filter(id => hot.has(id)));
+    ids.forEach(id => { hot.delete(id); queue.delete(id); });
     try {
       for (const t of await jupiter.get('https://lite-api.jup.ag/tokens/v2/search?query=' + ids.join(','))) {
         const cur = meta.get(t.id) || {};
@@ -276,23 +282,26 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
           holders: Number.isFinite(t.holderCount) ? t.holderCount : cur.holders ?? null });
       }
       for (const id of ids) if (!meta.get(id)?.icon) fromUri(id);
-    } catch { ids.forEach(id => queue.add(id)); }
-    running = false;
+    } catch { ids.forEach(id => (wasHot.has(id) ? hot : queue).add(id)); } // a failed batch keeps its place
+    finally { running = false; }
   }, 500);
 
+  // a coin with both a name and an image is done; others are looked up, retried after 20s then every minute
   function request(id) {
-    if (!id || meta.get(id)?.icon || queue.has(id)) return;
+    const m = meta.get(id);
+    if (!id || (m?.icon && m?.symbol) || queue.has(id) || hot.has(id)) return;
     const t = next.get(id) || { n: 0, at: 0 };
     if (Date.now() < t.at) return;
     t.at = Date.now() + IMAGE_RETRY[Math.min(t.n, IMAGE_RETRY.length - 1)]; t.n++;
     next.set(id, t); cap(next, 100000);
     queue.add(id);
+    while (queue.size > QUEUE_MAX) queue.delete(queue.values().next().value); // oldest first
   }
-  // holder counts change by the minute: re-fetch them for coins on the lists (batched with other lookups)
+  // holder counts change by the minute: re-fetch them for coins on the lists, ahead of everything else (batched)
   function refreshStats(id, everyMs = 60000) {
-    if (!id || queue.has(id) || Date.now() - (statsAt.get(id) || 0) < everyMs) return;
+    if (!id || hot.has(id) || Date.now() - (statsAt.get(id) || 0) < everyMs) return;
     statsAt.set(id, Date.now()); cap(statsAt, 20000);
-    queue.add(id);
+    queue.delete(id); hot.add(id);
   }
   // a listed coin's creator links: read its metadata file once (retried a minute later if unreadable)
   function requestLinks(id) {
@@ -319,7 +328,7 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
     stats: () => {
       let icons = 0, links = 0;
       for (const m of meta.values()) { if (m.icon) icons++; if (m.links) links++; }
-      return { tokens: meta.size, withImage: icons, withLinks: links, lookupQueue: queue.size, metadataLinks: uris.size };
+      return { tokens: meta.size, withImage: icons, withLinks: links, lookupQueue: queue.size, lookupListed: hot.size, metadataLinks: uris.size };
     },
   };
 }

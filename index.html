@@ -57,7 +57,11 @@ header {
 
 .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 /* the header collapses to one slim line (the live status) to give the lists the room */
-.hdr-toggle { margin-left: auto; background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); cursor: pointer;
+/* while it's collapsed, Add panel and Clear volume sit beside the toggle */
+.hdr-quick { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.hdr-quick .btn { padding: 2px 8px; font-size: 11px; }
+.hdr-quick .agemenu { left: auto; right: 0; }
+.hdr-toggle { background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); cursor: pointer;
   width: 26px; height: 22px; padding: 0; display: grid; place-items: center; }
 .hdr-toggle:hover, .hdr-toggle:focus-visible { color: var(--fg); background: var(--raise); }
 .hdr-toggle svg { width: 12px; height: 12px; transition: transform .15s; }
@@ -277,6 +281,17 @@ table.bw td.hot { color: var(--sell); font-weight: 600; }
 .pane-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-win { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 5px; font: inherit; font-size: 11px; padding: 2px 4px; cursor: pointer; font-variant-numeric: tabular-nums; }
 .pane-win:hover, .pane-win:focus-visible { border-color: var(--muted); }
+.pane-info { display: grid; place-items: center; width: 18px; height: 18px; color: var(--muted); cursor: help; border-radius: 4px; }
+.pane-info:hover, .pane-info:focus-visible { color: var(--fg); }
+.pane-info svg { width: 14px; height: 14px; }
+/* how a list works: a popup on hover or focus of a panel's ⓘ or a list tab (in place of the browser's tooltip) */
+#infoPop { position: fixed; z-index: 100; max-width: min(380px, calc(100vw - 16px)); background: var(--raise); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5; color: var(--fg); box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  pointer-events: none; text-transform: none; letter-spacing: 0; white-space: normal; }
+#infoPop h4 { margin: 0 0 6px; font: 700 13px/1.3 var(--display); }
+#infoPop p { margin: 0 0 5px; }
+#infoPop code { display: block; margin: 2px 0 6px; padding: 6px 8px; border-radius: 6px; background: var(--bg); font-size: 11px; color: var(--muted); }
+#infoPop .all { margin: 8px 0 0; padding-top: 7px; border-top: 1px solid var(--line); color: var(--muted); }
 .pane-close { all: unset; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 12px; }
 .pane-close:hover, .pane-close:focus-visible { color: var(--fg); background: var(--raise); }
 .pane-close:disabled { opacity: .35; cursor: default; background: none; }
@@ -394,6 +409,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
   <h1 class="sr-only">Solana Liquidity Bubbles</h1>
   <div class="status" role="status" aria-live="polite"><span class="dot warn" id="dot"></span><span id="statusText">Connecting…</span></div>
   <div class="rpc-info" id="rpcInfo" hidden></div>
+  <div class="hdr-quick" id="hdrQuick"></div>
   <button type="button" class="hdr-toggle" id="hdrToggle" aria-expanded="true" aria-controls="controls" title="Hide the controls"><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 7.5L6 4l3.5 3.5"/></svg></button>
   <div class="controls" id="controls">
     <div class="seg" role="group" aria-label="View" id="viewSeg">
@@ -466,6 +482,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <div class="overlay-msg" id="overlay">Waiting for pools…</div>
     <div class="legend-float" id="legend"></div>
     <div id="tip" hidden></div>
+    <div id="infoPop" role="tooltip" hidden></div>
     <div id="colPanel" class="col-panel" role="dialog" aria-label="List columns" hidden>
       <div class="col-head"><b>Columns</b><small>Drag rows or use the arrows to reorder. Unticked columns are hidden.</small></div>
       <ol id="colList"></ol>
@@ -1135,18 +1152,21 @@ async function copyText(text) {
     ta.remove(); return ok;
   }
 }
-document.addEventListener('click', async e => {
+document.addEventListener('click', e => {
   const b = e.target.closest('.copy[data-ca]');
   if (!b) return;
   e.stopPropagation(); // don't also open the row
-  const mint = b.dataset.ca;
-  if (!(await copyText(mint))) { b.title = 'Copy failed: select the address in the pool panel instead'; return; }
+  copyMint(b.dataset.ca, b);
+}, true);
+// copy a coin's contract address (its copy button, or a click on its row); every copy button for it ticks
+async function copyMint(mint, b) {
+  if (!(await copyText(mint))) { if (b) b.title = 'Copy failed: select the address in the pool panel instead'; return; }
   copiedUntil.set(mint, Date.now() + 1500);
   for (const x of document.querySelectorAll('.copy[data-ca="' + CSS.escape(mint) + '"]')) { x.classList.add('done'); x.innerHTML = ICON_DONE; x.title = 'Copied'; }
   setTimeout(() => {
     for (const x of document.querySelectorAll('.copy[data-ca="' + CSS.escape(mint) + '"]')) { x.classList.remove('done'); x.innerHTML = ICON_COPY; x.title = 'Copy contract address'; }
   }, 1500);
-}, true);
+}
 
 // ---------- deployer flagged as a bundler (isitbundled.com Wallet DB) ----------
 const ICON_RED_FLAG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 1.5v13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" fill="none"/><path d="M4 2.2h8.6l-2.1 3.2 2.1 3.2H4z" fill="currentColor"/></svg>';
@@ -1588,6 +1608,60 @@ const shownColumns = pane => {
 // whole list. Panels, their sizes and which are collapsed are saved with the other settings.
 const PANEL_LISTS = { trending: 'Trending', top: 'Top volume', breakout: 'Breakout', volume: 'Volume' }, MAX_PANELS = 6;
 const panelLabel = c => PANEL_LISTS[c.list] + (c.list === 'volume' ? ' · ' + c.window : '');
+// How each list is built and ranked (stream/server.js and lib/breakout.js), shown on hover of a panel's ⓘ and of
+// the list tabs
+const LIST_INFO_ALL = '\n\nEvery list: Genuine only and the age filter apply, up to 100 coins. Click a column header to sort by it instead.';
+function listInfo(list, win) {
+  if (list === 'trending') return 'Trending: coins gaining momentum right now.\n' +
+    'Needs 8+ swaps in the last 5 minutes and $500+ liquidity.\n' +
+    'Ranked by a momentum score, highest first:\nlog(5m volume) × (1 + pace, up to 4×) × (0.6 + buy share) × (1 + traders / 40, up to 2×) × (1 + 5m price rise / 50, up to 2×).\n' +
+    'Pace: the last 5 minutes’ volume against the coin’s own 5-minute average over the past hour.' + LIST_INFO_ALL;
+  if (list === 'top') return 'Top volume: the most traded coins.\nRanked by 24h volume, highest first (ties by 5m volume).\n' +
+    'Counts the swaps this server has seen, up to 24h: since it started, or since Clear volume.' + LIST_INFO_ALL;
+  if (list === 'volume') return 'Volume' + (win ? ' over ' + win : '') + ': the most traded coins over a window you pick.\n' +
+    'Ranked by volume in that window, highest first; coins with none are left out.\n' +
+    '1m counts the last 60 seconds of swaps; 15m to 1h add up per-minute totals and 4h to 24h hourly totals (the current minute or hour included).\n' +
+    'The bar before the volume is buys (green) against sells in the window, with buys ÷ sells above it.' + LIST_INFO_ALL;
+  if (list === 'breakout') return 'Breakout: safer small caps whose trading looks like the run-up to a 2×. A screen, not a prediction.\n' +
+    'A coin must pass every gate: genuine trading, no bundler deployer, not 80% down from its high, $3K+ liquidity, $5K to $2M market cap, ' +
+    '10+ swaps and 8+ traders in 5 minutes, at least half of them buys, under 20% bundled with the bundle holding under 10%, ' +
+    'not up over 400% this hour, not down over 10% in 5 minutes.\n' +
+    'Ranked by a setup score (0 to 100; 40+ to be listed): small market cap 25%, buy share 20%, volume pace against its hour 20%, ' +
+    'traders 15%, pool depth 10%, bonding-curve progress 10% (most for 40% to 100% along); cut by 30% if it’s already up 150% this hour.' + LIST_INFO_ALL;
+  return '';
+}
+const ICON_INFO = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M8 7.2v4"/><circle cx="8" cy="4.9" r=".55" fill="currentColor"/></svg>';
+const infoHtml = c => { const t = listInfo(c.list, c.window); return '<span class="pane-info" tabindex="0" role="img" data-info="' + esc(t) + '" aria-label="' + esc(t) + '">' + ICON_INFO + '</span>'; };
+// the list tabs carry the same explanation (Volume's names the window picked)
+function renderListInfo() {
+  for (const b of $('srcSeg').querySelectorAll('button')) {
+    const t = b.dataset.v === 'both' ? 'Several lists side by side: add, remove, resize and drag panels to reorder them. Hover a panel’s ⓘ for how its list works' : listInfo(b.dataset.v, state.volWindow);
+    if (b.dataset.info !== t) { b.dataset.info = t; b.removeAttribute('title'); }
+  }
+}
+// The popup: the first line is its heading, a formula line is shown as code, and the "Every list" note sits apart
+function infoPopHtml(t) {
+  const [main, all] = t.split('\n\n'), [head, ...lines] = main.split('\n');
+  return '<h4>' + esc(head) + '</h4>' + lines.map(l => /^log\(/.test(l) ? '<code>' + esc(l) + '</code>' : '<p>' + esc(l) + '</p>').join('') +
+    (all ? '<p class="all">' + esc(all) + '</p>' : '');
+}
+let infoFor = null;
+function showInfo(el) {
+  const pop = $('infoPop');
+  if (infoFor === el && !pop.hidden) return;
+  infoFor = el; setH(pop, infoPopHtml(el.dataset.info)); pop.hidden = false;
+  // below the element, or above when there's no room; kept inside the window
+  const r = el.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+  const below = r.bottom + 8 + h <= innerHeight || r.top - 8 - h < 0;
+  pop.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + 'px';
+  pop.style.top = (below ? r.bottom + 8 : r.top - 8 - h) + 'px';
+}
+function hideInfo() { infoFor = null; $('infoPop').hidden = true; }
+document.addEventListener('mouseover', e => { const el = e.target.closest?.('[data-info]'); if (el) showInfo(el); else if (infoFor) hideInfo(); });
+document.addEventListener('focusin', e => { const el = e.target.closest?.('[data-info]'); if (el) showInfo(el); else if (infoFor) hideInfo(); });
+document.addEventListener('focusout', e => { if (infoFor && e.target === infoFor) hideInfo(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && infoFor) hideInfo(); });
+for (const t of ['scroll', 'dragstart', 'pointerdown']) document.addEventListener(t, () => { if (infoFor) hideInfo(); }, true);
 function cleanPanels(v) {
   if (!Array.isArray(v)) return null;
   const out = v.filter(c => c && Object.hasOwn(PANEL_LISTS, c.list)).slice(0, MAX_PANELS)
@@ -1698,14 +1772,13 @@ function setupPanes() {
     if (!both) return;
     // a Volume panel names its window in its dropdown, so the title stays short enough for a narrow pane
     setT(p.label, PANEL_LISTS[c.list]);
-    p.title.draggable = state.panels.length > 1;
-    p.title.title = state.panels.length > 1 ? 'Drag to move this panel (or Alt + arrow keys)' : '';
-    setH(p.tools, (c.list === 'volume' ? '<select class="pane-win" aria-label="Volume panel window" title="Change this panel’s window">' +
+    p.title.draggable = state.panels.length > 1; // the grab cursor shows it can be dragged: no tooltip
+    setH(p.tools, infoHtml(c) + (c.list === 'volume' ? '<select class="pane-win" aria-label="Volume panel window" title="Change this panel’s window">' +
       VOL_WINDOWS.map(w => '<option value="' + w + '"' + (w === c.window ? ' selected' : '') + '>' + w + '</option>').join('') + '</select>' : '') +
       '<button type="button" class="pane-close" data-close aria-label="Remove the ' + esc(panelLabel(c)) + ' panel" title="Remove this panel"' + (state.panels.length < 2 ? ' disabled' : '') + '>✕</button>');
   });
   applyPaneSizes();
-  renderAddPanel();
+  renderAddPanel(); renderListInfo();
 }
 function panelsChanged() { setupPanes(); streamConfig(); rebuildList(); saveSettings(); }
 function addPanel(c) {
@@ -1917,7 +1990,8 @@ function makeRow(cols, id) {
     COLUMNS[k].init?.(td);
     tr.appendChild(td);
   }
-  tr.addEventListener('click', () => select(byId.get(tr.dataset.id)));
+  // a click opens the coin and copies its contract address
+  tr.addEventListener('click', () => { const n = byId.get(tr.dataset.id); select(n); if (n?.mint) copyMint(n.mint); });
   tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(byId.get(tr.dataset.id)); } });
   return tr;
 }
@@ -2421,8 +2495,11 @@ function setPanel(on) {
   $('panelBtn').setAttribute('aria-expanded', on ? 'true' : 'false');
 }
 $('panelBtn').addEventListener('click', () => setPanel(!state.panel));
-// the header's controls can be folded away, leaving one slim status line
+// the header's controls can be folded away, leaving one slim status line; Add panel and Clear volume move beside
+// its toggle meanwhile (the same buttons, so they still show only on the lists they apply to)
+const quickItems = ['addPanel', 'clearVolBtn'].map(id => { const el = $(id), mark = document.createComment(id); el.before(mark); return { el, mark }; });
 function setHeader(open) {
+  for (const q of quickItems) if (open) q.mark.after(q.el); else $('hdrQuick').appendChild(q.el);
   state.headerOpen = open;
   document.querySelector('header').classList.toggle('collapsed', !open);
   $('hdrToggle').setAttribute('aria-expanded', String(open));
