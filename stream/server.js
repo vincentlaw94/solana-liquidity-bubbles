@@ -12,14 +12,16 @@
 //      BUNDLE_DETECT=0 to turn off this server's own launch-bundle detector (Jito + block-order fallback),
 //      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start,
 //      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz,
-//      HOLDERS=0 to skip the top-holder scan (lib/holders.js)
+//      HOLDERS=0 to skip the top-holder scan (lib/holders.js),
+//      TRADERS=0 to skip following wallets (lib/traders.js), TRADER_WINDOW_MIN (60) for how far back it looks,
+//      WS_ROTATE_MS (12000; 0 = off) for how often the public websocket is replaced before it gets cut
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022MetadataUri } from './lib/decode.js';
+import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022Metadata, metaplexMetadataAddress, metaplexMetadata } from './lib/decode.js';
 import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
 import { loadBundlerWallets, syncBundlerWallets } from './lib/bundlers.js';
 import { createJito, createBundleDetector } from './lib/bundles.js';
@@ -33,6 +35,8 @@ import { createAthWatch } from './lib/ath.js';
 import { rankBreakout, createBreakoutTracker } from './lib/breakout.js';
 import { createPins } from './lib/pins.js';
 import { createHolderScan } from './lib/holders.js';
+import { rankTraction } from './lib/traction.js';
+import { createTraders } from './lib/traders.js';
 
 const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
 const LASER_ENDPOINT = process.env.LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com';
@@ -65,8 +69,20 @@ const rpc = HELIUS_RPC
   : publicRpc;
 const accounts = createAccountLoader(rpc);
 const images = createImageProxy();
-// image fallback: the metadata link stored in a Token-2022 mint (pump.fun coins have one), read in batches
-const meta = createTokenMeta({ metadata: images.metadata, onchainUri: async mint => token2022MetadataUri((await accounts.get(mint, true))?.data) });
+// A coin's name, symbol and metadata link as stored on-chain, read in batches: in its Token-2022 mint (pump.fun
+// coins have them there), otherwise in its Metaplex metadata account. This is where names come from when Jupiter
+// hasn't answered, and the image fallback.
+async function onchainMeta(mint) {
+  const own = token2022Metadata((await accounts.get(mint, true))?.data);
+  accounts.forget(mint); // not kept: mint accounts of every coin that ever traded would pile up
+  if (own) return own;
+  const at = metaplexMetadataAddress(mint);
+  if (!at) return null;
+  const acc = await accounts.get(at, true);
+  accounts.forget(at); // read once: a metadata account created later is found by the next try
+  return metaplexMetadata(acc?.data);
+}
+const meta = createTokenMeta({ metadata: images.metadata, onchain: onchainMeta });
 const prices = createPrices();
 const clients = new Set();
 // performance counters, reported under /api/stats -> perf
@@ -135,6 +151,8 @@ let pinRows = []; // one row per pin, rebuilt each tick and added to the Breakou
 // top holders of the coins people are looking at, and any single wallet holding over 3.5% of supply. On the public
 // RPC (one coin at a time), so the Helius budget stays for live account lookups
 const holders = process.env.HOLDERS !== '0' ? createHolderScan({ rpc: publicRpc, log }) : null;
+// who is trading what over the last hour: the Traders view, an open coin's traders and what else they trade
+const traders = process.env.TRADERS !== '0' ? createTraders({ windowMs: (+process.env.TRADER_WINDOW_MIN || 60) * 60e3 }) : null;
 
 // ---- snapshot: restore the last run's state before the feed starts, save it every minute and on shutdown ----
 const snapshot = process.env.SNAPSHOT !== '0' ? createSnapshot({ file: path.join(DATA_DIR, 'snapshot.json.gz'), log }) : null;
@@ -218,6 +236,7 @@ function startWebsocket() {
   return createLogStream({
       url: RPC_WS,
       programs: SUBSCRIBED,
+      rotateMs: process.env.WS_ROTATE_MS != null ? +process.env.WS_ROTATE_MS : 12000,
       onStatus: s => log('chain ' + s),
       onLogs(name, sig, logs, err, slot) {
         bump(counters.notifications, name);
@@ -294,8 +313,9 @@ function trendScore(r, now) {
 // Breakout), each coin tagged with its place in each as `ranks` (one entry per panel, null where it isn't listed).
 // Breakout coins also carry their setup score as `setup`, and why; Volume coins their volume per window as `vols`.
 // "breakout" ranks setups by lib/breakout.js's score, and only coins passing its safety gates
-const LISTS = ['trending', 'top', 'both', 'breakout', 'volume'];
-const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume'], MAX_PANELS = 6;
+// "traction" ranks coins gaining traders (lib/traction.js): the last 5 minutes against the 25 before; its score is `trac`
+const LISTS = ['trending', 'top', 'both', 'breakout', 'volume', 'traction'];
+const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume', 'traction'], MAX_PANELS = 6;
 const DEFAULT_PANELS = [{ list: 'trending' }, { list: 'top' }, { list: 'breakout' }];
 // panels as the dashboard sends them ([{ list, window }]) or as a query string ("trending,top,volume:15m")
 function readPanels(v) {
@@ -328,21 +348,23 @@ function pick(rows, cfg) {
   if (cfg.list === 'breakout') return rankBreakout(eligible, cfg.limit, Date.now());
   if (cfg.list === 'volume') return rankVolume(eligible, cfg.limit, cfg.window, now);
   if (cfg.list === 'trending') return rankTrending(eligible, cfg.limit, now);
+  if (cfg.list === 'traction') return rankTraction(eligible, cfg.limit);
   // Panels: each panel's list (the same list twice, e.g. two Volume panels with one window, is ranked once)
   const ranked = new Map(), out = new Map(), n = cfg.panels.length;
   const rank = p => {
     const k = p.list + ':' + (p.window || '');
     if (!ranked.has(k)) ranked.set(k, p.list === 'top' ? rankTop(eligible, cfg.limit) : p.list === 'breakout' ? rankBreakout(eligible, cfg.limit, now) :
-      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : rankTrending(eligible, cfg.limit, now));
+      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : p.list === 'traction' ? rankTraction(eligible, cfg.limit) : rankTrending(eligible, cfg.limit, now));
     return ranked.get(k);
   };
   cfg.panels.forEach((p, i) => rank(p).forEach((r, j) => {
     let o = out.get(r.id);
     // `score` is the trend score: Breakout's own score travels as `setup`
-    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, volW: null, vols: null, bs: null, ranks: new Array(n).fill(null) });
+    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, trac: null, volW: null, vols: null, bs: null, ranks: new Array(n).fill(null) });
     o.ranks[i] = j + 1;
     if (p.list === 'trending') o.score = r.score;
     else if (p.list === 'breakout') Object.assign(o, { setup: r.setup, why: r.why });
+    else if (p.list === 'traction') o.trac = r.trac;
     else if (p.list === 'volume') { o.vols = { ...o.vols, [p.window]: r.volW }; o.bs = { ...o.bs, ...r.bs }; }
   }));
   return [...out.values()];
@@ -373,13 +395,15 @@ function stats() {
     source: feed.type === 'laserstream'
       ? { type: 'laserstream', endpoint: feed.chain.endpoint, commitment: LASER_COMMITMENT, lastSlot: feed.chain.lastSlot, transactions: feed.chain.received }
       : { type: 'rpc-websocket', endpoint: RPC_WS.replace(/api-key=[^&]+/, 'api-key=***'), note: feed.note,
+          // connections replaced before the RPC could cut them, and repeated notifications dropped (the RPC sends many twice)
+          rotations: feed.chain.rotations || 0, duplicates: feed.chain.duplicates || 0,
           laserstreamCheckedAt: feed.checkedAt, nextLaserstreamCheck: LASER_KEY && feed.checkedAt ? feed.checkedAt + LASER_RECHECK_MS : null },
     volumeClearedAt: market.volClearedAt || null, // Top volume counts from here when it was cleared under a day ago
     tradesPerSec: +tps.toFixed(1), perProgram: rate.perSec, pools: market.pools.size, trades: market.counts.trades,
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
-    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
+    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
@@ -439,6 +463,22 @@ function percentiles(arr) {
 }
 
 let latestRows = [];
+// pool id -> row, built on first use each tick
+let rowIndex = null;
+const rowById = id => (rowIndex ||= new Map(latestRows.map(r => [r.id, r]))).get(id);
+// what the trader views show of a coin: its listed row if it has one, else what is known of its pool
+const shortAddr = a => a ? a.slice(0, 4) + '…' + a.slice(-4) : '?';
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+function coinInfo(id) {
+  const r = rowById(id);
+  if (r) return { id, mint: r.mint, sym: r.sym, name: r.name || null, icon: r.icon, venue: r.venue, mcap: r.mcap, chg5: r.chg5, genuine: r.genuine };
+  const p = market.pools.get(id);
+  // a pool whose base side is SOL holds the launched token on its quote side
+  const mint = (p?.mint === SOL_MINT && p.quoteMint ? p.quoteMint : p?.mint) || (id.startsWith('pump:') ? id.slice(5) : null);
+  const m = (mint && meta.get(mint)) || {};
+  return { id, mint, sym: m.symbol || p?.createdName?.symbol || shortAddr(mint || id), name: m.name || null, icon: m.icon || null, venue: p ? market.venue(p) : null, unlisted: true };
+}
+const withCoin = c => ({ ...c, coin: coinInfo(c.pool) });
 
 // ---- list snapshots as deltas ----
 // A coin's static fields (names, logo, addresses) go to a client once, and again only if they change;
@@ -447,7 +487,7 @@ const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'bor
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
   'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'bs', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
-  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW'];
+  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW', 'trG', 'volG', 'net5', 'trac'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -504,11 +544,30 @@ function pickShared(cfg, selected) {
 const ATH_LIST = readConfig({ list: 'top' });
 // the list the Breakout record follows: as a fresh dashboard shows it (Genuine only, every venue)
 const BREAKOUT_LIST = readConfig({ list: 'breakout' });
-let athSent = '', breakoutSent = '', pinsSent = '';
+// The ATH watch on the wire. It follows a few hundred coins and most of them don't change between sends, so
+// like the lists it goes out as deltas: only what the panel shows, only the coins that changed since the last
+// send, and their order only when it changed. (Sent whole every 2 seconds it was about 100 KB each time.)
+const r4 = v => v == null ? undefined : +v.toPrecision(4);
+const athWire = c => JSON.stringify({ mint: c.mint, pool: c.pool, sym: c.sym, rank: c.rank ?? undefined, bestRank: c.bestRank ?? undefined,
+  topAt: c.rank ? undefined : c.topAt, // only shown for coins that left the top 10 (it moves every tick for those in it)
+  mcap: r4(c.mcap), ath: r4(c.ath), athAt: c.athAt, ddAt: c.ddAt || undefined, ddLow: c.ddLow ? r4(c.ddLow) : undefined,
+  drawdowns: c.drawdowns || undefined, resets: c.resets || undefined });
+let athRows = new Map(), athOrder = '[]';
+// what changed since the last call (null if nothing did); every client has received everything before it
+function athDelta() {
+  const list = athWatch.list(), next = new Map(), changed = [];
+  for (const c of list) { const s = athWire(c); next.set(c.mint, s); if (athRows.get(c.mint) !== s) changed.push(s); }
+  const order = JSON.stringify(list.map(c => c.mint)), moved = order !== athOrder;
+  athRows = next; athOrder = order;
+  return changed.length || moved ? '{"type":"ath"' + (moved ? ',"order":' + order : '') + ',"coins":[' + changed.join(',') + ']}' : null;
+}
+// the whole watch as of the last delta, for a browser that just connected
+const athFull = () => '{"type":"ath","reset":true,"order":' + athOrder + ',"coins":[' + [...athRows.values()].join(',') + ']}';
+let breakoutSent = '', pinsSent = '';
 setInterval(() => {
   if (!clients.size) return;
-  const s = JSON.stringify({ type: 'ath', coins: athWatch.list() });
-  if (s !== athSent) { athSent = s; for (const c of clients) sendTo(c, 'ath', s); }
+  const s = athDelta();
+  if (s) for (const c of clients) sendTo(c, 'ath', s);
   const b = JSON.stringify({ type: 'breakout', stats: breakout.stats() });
   if (b !== breakoutSent) { breakoutSent = b; for (const c of clients) sendTo(c, 'breakout', b); }
   // pins as browsers save them, so each keeps a copy
@@ -519,7 +578,7 @@ setInterval(() => {
   const t0 = performance.now();
   latestRows = market.rows();
   sample(perf.rowsMs, performance.now() - t0);
-  encoded = new Map(); pickCache = new Map();
+  encoded = new Map(); pickCache = new Map(); rowIndex = null;
   athWatch.rank(pickShared(ATH_LIST), latestRows);
   // every row has its ATH (lib/market.js); coins the ATH watch follows also carry its drawdown mark
   for (const r of latestRows) { const a = athWatch.get(r.mint); if (a) { if (a.ath > (r.ath || 0)) { r.ath = a.ath; r.athAt = a.athAt; } r.ddAt = a.ddAt; } }
@@ -580,6 +639,8 @@ market.onTrade = () => {
     const trades = market.drain();
     if (!trades.length) return;
     for (const t of trades) { athWatch.trade(t); breakout.trade(t); pins.trade(t); }
+    // wallets are followed on the coins the lists can show (PumpSwap's non-launchpad pools would swamp them)
+    if (traders) for (const t of trades) if (rowById(t.p)) traders.trade(t);
     const now = Date.now();
     for (const t of trades) { sample(lat.push, now - t.t); if (t.ct) sample(lat.chain, t.t - t.ct); }
     // what a list row needs: pool, time, side, USD size, and the pool's price / market cap / liquidity after it
@@ -662,6 +723,24 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/pins') {
     // pinned coins: market cap when pinned, peak since, now, and why each looks dead (if it does)
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), pins: pins.list() }));
+  } else if (url.pathname === '/api/traders') {
+    // the most active wallets over the last hour: sort = usd (volume) | net (net buying) | coins | trades; bots=0 leaves out bot-like wallets
+    if (!traders) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'wallet tracking is off (TRADERS=0)' })); return; }
+    const q = url.searchParams, limit = Math.max(1, Math.min(200, +q.get('limit') || 50));
+    const list = traders.top({ sort: q.get('sort') || 'usd', limit, bots: q.get('bots') !== '0', minUsd: Math.max(0, +q.get('minUsd') || 0) });
+    for (const w of list) w.top = w.top.map(withCoin);
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin: Math.round(traders.windowMs / 60e3), since: started, stats: traders.stats(), traders: list }));
+  } else if (url.pathname === '/api/trader') {
+    // one wallet: every coin it traded in the window, with what it bought and sold of each
+    const w = traders?.wallet(url.searchParams.get('wallet') || '');
+    if (w) w.coinList = w.coinList.slice(0, 100).map(withCoin);
+    res.writeHead(w ? 200 : 404, { 'content-type': 'application/json' }).end(JSON.stringify(w ? { at: Date.now(), windowMin: Math.round(traders.windowMs / 60e3), since: started, ...w } : { error: traders ? 'no swaps from this wallet in the window' : 'wallet tracking is off (TRADERS=0)' }));
+  } else if (url.pathname === '/api/pool-traders') {
+    // one pool: its biggest traders in the window, and the other coins its (non-bot) traders are in
+    if (!traders) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'wallet tracking is off (TRADERS=0)' })); return; }
+    const r = traders.pool(url.searchParams.get('id') || '');
+    r.also = r.also.map(withCoin);
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin: Math.round(traders.windowMs / 60e3), since: started, ...r }));
   } else if (url.pathname === '/api/clear-volume') {
     // start Top volume over: forget the 1h / 24h volume collected so far. POST only, and only from this machine's
     // own pages (any website can send a request to localhost): the dashboard served from it, or index.html opened
@@ -671,7 +750,7 @@ const server = http.createServer(async (req, res) => {
     else if (origin && origin !== 'null' && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) res.writeHead(403).end('not allowed from ' + origin);
     else {
       const pools = market.clearVolume();
-      latestRows = market.rows(); // the next ranking tick reads the cleared buckets
+      latestRows = market.rows(); rowIndex = null; // the next ranking tick reads the cleared buckets
       saveSnapshot();
       log(`volume cleared on ${pools} pools: Top volume starts over`);
       broadcast({ type: 'stats', stats: stats() });
@@ -706,7 +785,10 @@ wss.on('connection', ws => {
   const send = m => sendTo(c, m.type, JSON.stringify(m));
   send({ type: 'hello', programs: SUBSCRIBED });
   send({ type: 'stats', stats: stats() });
-  send({ type: 'ath', coins: athWatch.list() });
+  // bring the others up to date first, so the full copy this browser gets matches what later deltas build on
+  const athNews = athDelta();
+  if (athNews) for (const o of clients) if (o !== c) sendTo(o, 'ath', athNews);
+  sendTo(c, 'ath', athFull());
   send({ type: 'breakout', stats: breakout.stats() });
   send({ type: 'pins', pins: pins.saved(), unpinned: pins.unpinned() });
   pushPools(c, true);

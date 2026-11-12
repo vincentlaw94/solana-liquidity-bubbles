@@ -147,20 +147,60 @@ export function decodeDbcTx(tx) {
 // Token-2022 mints can carry their metadata (name, symbol, metadata link) on-chain: after the 82-byte mint,
 // padding to byte 165 and an account-type byte, extensions follow as TLV entries (type u16, length u16, value).
 // Type 19 is TokenMetadata: update authority (32), mint (32), then name, symbol, uri as u32-prefixed strings.
-export function token2022MetadataUri(data) {
+const metaUri = raw => { const uri = (raw || '').replace(/\u0000/g, '').trim().replace(/^(https?|ipfs):/i, m => m.toLowerCase()); return /^(https?|ipfs):\/\//.test(uri) ? uri.slice(0, 300) : null; };
+export function token2022Metadata(data) {
   if (!data || data.length <= 170) return null;
   for (let o = 166; o + 4 <= data.length;) {
     const type = data.readUInt16LE(o), len = data.readUInt16LE(o + 2);
     if (type === 19 && o + 4 + len <= data.length) {
       const v = data.subarray(o + 4, o + 4 + len);
       let p = 64;
-      const str = () => { const n = v.readUInt32LE(p); const s = v.toString('utf8', p + 4, p + 4 + n); p += 4 + n; return s; };
-      try { str(); str(); const uri = str().trim().replace(/^(https?|ipfs):/i, m => m.toLowerCase()); return /^(https?|ipfs):\/\//.test(uri) ? uri : null; } catch { return null; }
+      const str = () => { const n = v.readUInt32LE(p); if (p + 4 + n > v.length) throw new Error('short'); const s = v.toString('utf8', p + 4, p + 4 + n); p += 4 + n; return s; };
+      try { const name = clean(str()), symbol = clean(str()), uri = metaUri(str()); return name || symbol || uri ? { name, symbol, uri } : null; } catch { return null; }
     }
     if (!len && !type) break;
     o += 4 + len;
   }
   return null;
+}
+export const token2022MetadataUri = data => token2022Metadata(data)?.uri || null;
+
+// Classic SPL mints keep their name in a Metaplex metadata account at a derived address:
+// PDA(['metadata', metaplex program, mint], metaplex program). Deriving it needs the ed25519 "is this a curve
+// point" test (a PDA is the first candidate that is NOT one), done here with BigInt field arithmetic.
+const METAPLEX = 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s';
+const P25519 = 2n ** 255n - 19n;
+const D25519 = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+const mod = v => ((v % P25519) + P25519) % P25519;
+function pow(b, e) { let r = 1n; b = mod(b); while (e > 0n) { if (e & 1n) r = r * b % P25519; b = b * b % P25519; e >>= 1n; } return r; }
+export function onCurve(bytes) {
+  let y = 0n;
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(i === 31 ? bytes[i] & 0x7f : bytes[i]);
+  y = mod(y);
+  const y2 = y * y % P25519, u = mod(y2 - 1n), v = mod(D25519 * y2 + 1n);
+  const v3 = v * v % P25519 * v % P25519, v7 = v3 * v3 % P25519 * v % P25519;
+  const x = u * v3 % P25519 * pow(u * v7, (P25519 - 5n) / 8n) % P25519;
+  const vx2 = v * x % P25519 * x % P25519;
+  return vx2 === u || vx2 === mod(-u);
+}
+export function programAddress(seeds, programId) {
+  const prog = Buffer.from(bs58.decode(programId));
+  for (let bump = 255; bump >= 0; bump--) {
+    const h = createHash('sha256');
+    for (const s of seeds) h.update(s);
+    const out = h.update(Buffer.from([bump])).update(prog).update('ProgramDerivedAddress').digest();
+    if (!onCurve(out)) return bs58.encode(out);
+  }
+  return null;
+}
+export const metaplexMetadataAddress = mint => programAddress([Buffer.from('metadata'), Buffer.from(bs58.decode(METAPLEX)), Buffer.from(bs58.decode(mint))], METAPLEX);
+// Metaplex Metadata account: key u8, update authority (32), mint (32), then name, symbol, uri as u32-prefixed
+// strings padded with zero bytes
+export function metaplexMetadata(data) {
+  if (!data || data.length < 80) return null;
+  let p = 65;
+  const str = () => { const n = data.readUInt32LE(p); if (n > 400 || p + 4 + n > data.length) throw new Error('short'); const s = data.toString('utf8', p + 4, p + 4 + n); p += 4 + n; return s; };
+  try { const name = clean(str()), symbol = clean(str()), uri = metaUri(str()); return name || symbol || uri ? { name, symbol, uri } : null; } catch { return null; }
 }
 
 // LaunchLab PlatformConfig: name is a fixed [u8; 64] at offset 112.

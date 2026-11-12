@@ -107,6 +107,9 @@ venue goes quiet, re-check its event layout first.
 | `BACKFILL` | on | `0` skips rebuilding launches that happened before the server started |
 | `SNAPSHOT` | on | `0` starts empty every time instead of restoring the last run (see Snapshot) |
 | `HOLDERS` | on | `0` turns off the top-holder scan (see Top holders) |
+| `TRADERS` | on | `0` stops following wallets (see Traders) |
+| `TRADER_WINDOW_MIN` | `60` | How many minutes of swaps the Traders view and an open coin's traders cover |
+| `WS_ROTATE_MS` | `12000` | How often the websocket feed is replaced before the RPC cuts it (see Staying connected); `0` turns it off |
 
 Without LaserStream, the free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
 rate-limits the follow-up HTTP calls. In practice:
@@ -123,16 +126,17 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
-- `GET /api/pools?list=trending|top|both|breakout|volume&limit=100&minLiq=0&genuine=true&maxAge=0&window=1h`: a ranked pool list
+- `GET /api/pools?list=trending|traction|top|both|breakout|volume&limit=100&minLiq=0&genuine=true&maxAge=0&window=1h`: a ranked pool list
   (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
+  - `traction`: coins gaining traders, by traction score (see Traction list); rows carry it as `trac`
   - `top`: by 24h volume
   - `volume`: by volume over `window` (`1m`, `15m`, `30m`, `1h` (default), `4h`, `12h` or `24h`), carried by each row as
     `volW` (and as `vols: { <window>: volume }`), and its buys and sells over the window as `bs: { <window>: [buys, sells] }`. 1m counts the last 60 seconds of swaps; 15m to 1h add up 1-minute buckets (the current minute and those
     before it), 4h to 24h 1-hour buckets, so a window can reach back up to a minute or an hour further. Coins with no
     volume in the window are left out
   - `both`: the dashboard's Panels view: the union of the lists in `panels` (up to `limit` each), by default
-    `trending,top,breakout`. Up to 6 of `trending`, `top`, `breakout` and `volume:<window>` (e.g.
+    `trending,top,breakout`. Up to 6 of `trending`, `traction`, `top`, `breakout` and `volume:<window>` (e.g.
     `panels=trending,volume:1m,volume:4h`). Every row carries `ranks`, its place in each panel in order (null where it
     isn't listed); Breakout coins also carry `setup` (their setup score) and `why`, Volume coins `vols` (their volume
     per window) and `bs` (buys and sells per window)
@@ -148,6 +152,12 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/bundles?limit=50&min=0`: recent launches where wallets bought alongside the creator, newest first
   (`min`: smallest bundled %)
 - `GET /api/bundle-wallets?limit=100`: this server's compiled bundler-wallet DB, most launches first
+- `GET /api/traders?sort=usd|net|coins|trades&limit=50&bots=1&minUsd=0`: the most active wallets of the last hour (see
+  Traders), each with its volume, what it bought and sold, its swaps, how many coins it traded and its 3 most traded
+  (`top`, each with the `coin` it is). `bots=0` leaves out wallets that trade like bots
+- `GET /api/trader?wallet=<address>`: one wallet's totals and every coin it traded in the window (`coinList`); 404 if it made no swaps
+- `GET /api/pool-traders?id=<pool id>`: a pool's traders in the window: how many, how many bought or sold more, its 12
+  biggest (`top`), and the other coins its traders are in (`also`: coins shared by 2+ of its non-bot wallets, most wallets first)
 - `GET /api/ath`: the ATH watch (see below): every coin that reached the Top volume top 10, its current top-10 coins first
 - `GET /api/breakout?limit=1000`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX, `since`,
   and the same for the last day under `day`) and the coins it flagged, newest first, with their market cap then (`entry`), `peak` and `hitAt`
@@ -162,7 +172,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
   - `trades` (as each swap is decoded): `{p, t, b, u, pr, mc, lq}` per swap (pool, time, buy, USD size, and the
     pool's price, market cap and liquidity right after it); swaps of the client's open pool also carry `s` (tx) and `w` (wallet)
   - `stats` every 2s, `event` (launches and graduations, and the ATH watch's `drawdown` / `athReset`), `tape` (recent
-    swaps of a newly opened pool), `ath` (the ATH watch, every 2s when it changed), `breakout` (the Breakout record's
+    swaps of a newly opened pool), `ath` (the ATH watch every 2s as deltas: `coins` that changed, `order` when it changed, `reset` for the whole watch), `breakout` (the Breakout record's
     stats) and `pins` (pins as a browser saves them), each every 2s when changed
   - client → server: `{type:"config", list, limit, minLiq, genuine, maxAge, window, panels}` (`panels`: `[{list, window}]`, for list `both`), `{type:"select", id}`, `{type:"pin", mint, id}`,
     `{type:"unpin", mint}`, `{type:"pins", pins}` (a browser's saved pins; the server takes back any it doesn't have)
@@ -341,6 +351,68 @@ minute and checked each about 20s after launch, with no Jito rate limiting. That
 second it allows itself, so at busier times checks queue up. On one coin its result matched isitbundled.com
 exactly: 17% bundled, the same 5 wallets and percentages, 100% sold.
 
+## Coin names
+
+A coin's name and symbol come from its launch event when the server saw the launch, and otherwise from the chain
+itself, not from Jupiter: its Token-2022 mint (pump.fun coins carry name, symbol and metadata link there), or for a
+classic mint its Metaplex metadata account (`lib/decode.js`). They are read in batches of 100 accounts the moment a
+coin without a name is first seen, so a list never shows a contract address where a name should be. Jupiter's free
+API still supplies holder counts, creation times, launchpad labels and logos when it answers, but it rate-limits hard
+(every 429 widens the gap between calls, up to 10s), and names no longer wait for it. `/api/stats` →
+`images.namesFromChain` counts the lookups.
+
+## Staying connected
+
+The public RPC closes every websocket after about 20 to 40 seconds, whatever it carries. Reconnecting afterwards
+loses roughly a second of swaps each time, a few percent of everything. So the feed never lets a connection get that
+old (`createLogStream` in `lib/sources.js`): every 12 seconds (`WS_ROTATE_MS`) it opens a replacement, waits until it
+is subscribed, lets both deliver for a quarter of a second, and only then closes the old one. A notification that
+arrives on both is passed on once.
+
+The same check fixes a second problem: the public RPC sends close to half of all log notifications twice on one
+subscription (same signature, slot and logs). Each is now passed on once, recognised from the raw text before it is
+parsed; before, those swaps were counted twice in volumes, trade counts and the live swaps.
+
+`/api/stats` → `source.rotations` counts the hand-overs, `source.duplicates` the repeats dropped (the RPC's own and
+the overlaps'), and `reconnects` only the times a connection was lost with no replacement ready.
+
+## Traction list
+
+Trending follows volume; Traction follows how fast a coin's crowd is growing (`lib/traction.js`). Each pool's
+1-minute buckets count the wallets that traded in the minute and the minute's buys minus sells, and the last 5
+minutes are compared with the 25 before them:
+
+- **Trader growth** (`trG`): wallets trading in the last 5 minutes against an average 5 minutes of the 25 before
+  (both sides smoothed by 20, so 2 traders becoming 6 isn't "3×"). **Volume growth** (`volG`) is the same for volume,
+  smoothed by $500. Both are null until the earlier minutes were watched: about 10 minutes after the server starts or
+  first tracks the pool, unless it saw the coin launch (then the baseline really is nothing).
+- **Net flow** (`net5`): USD bought minus sold over those 5 minutes.
+- **Gates**: 8+ wallets and $300+ volume in 5 minutes, $1K+ liquidity, net buying, buys at least 80% of sells, price
+  not down over 15% in 5 minutes, and trader growth of 1.25× or more once it is known.
+- **Score** (`trac`): `log10(1 + traders) × √(trader growth, up to 10×) × √(volume growth, up to 10×) × (0.5 + net
+  buying's share of volume) × (1 + 5m price rise / 100, up to 1.5×)`.
+
+Every row carries `trG`, `volG` and `net5`, whatever list it is on. LaunchLab swaps on the public websocket feed don't
+name the trader, so those coins can't make this list. It is a screen for attention, not for safety: keep Genuine only
+on, and check the coin's bundle and holders before acting on it.
+
+## Traders
+
+The server follows every wallet that trades a coin the lists can show, over a rolling hour (`lib/traders.js`,
+`TRADER_WINDOW_MIN`): what it bought and sold of each coin, in USD. Three things come out of it:
+
+- **Traders view** (dashboard): the most active wallets by volume, net buying, coins traded or swaps, each with the
+  coins it trades most. Click a coin to open it, or a wallet for its card.
+- **Trader card**: one wallet's totals and every coin it traded in the hour. Any wallet opens it: in the Traders
+  view, in an open coin's traders, or in its live swaps.
+- **An open coin's traders**: how many wallets traded it, how many bought more than they sold, its biggest traders,
+  and "its traders are also in": the other coins that two or more of the same wallets are trading.
+
+Wallets that trade like bots are tagged (over 150 swaps in the hour, or 30+ swaps both ways with almost no net
+position), left out of the Traders view unless you tick Show bots, and never counted toward "also in". The hour is
+kept as six 10-minute slices, so totals cover between 50 and 60 minutes; they start empty on every start (wallets
+aren't saved in the snapshot). Up to 250,000 wallets are followed at once.
+
 ## ATH watch
 
 Every coin that reaches the top 10 of Top volume (as a fresh dashboard shows it: Genuine only, every venue) is followed
@@ -440,8 +512,8 @@ the dashboard follows the coin to its new pool.
 ## Prices
 
 SOL/USD comes from Coinbase every 2s (Binance as fallback). USDC and USDT are fixed at $1. Other quote tokens,
-plus token names, icons and creation times, come from Jupiter through one paced queue that pauses for 30s
-whenever Jupiter rate-limits. A price, once known, is kept if a refresh fails.
+plus token icons, holder counts and creation times, come from Jupiter through one paced queue that pauses for 30s
+whenever Jupiter rate-limits and then spaces its calls further apart (names come from the chain: see Coin names). A price, once known, is kept if a refresh fails.
 
 ## Definitions
 

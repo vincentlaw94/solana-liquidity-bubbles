@@ -56,6 +56,7 @@ export class Market {
     this.pools = new Map();
     this.outbox = [];
     this.counts = { trades: 0, unresolvedDrops: 0 };
+    this.startedAt = Date.now(); // traction compares against minutes this run actually watched
     setInterval(() => this.evict(), 60e3).unref?.();
   }
 
@@ -64,7 +65,7 @@ export class Market {
       quoteRes: 0, price: 0, progress: null, fundTarget: null, graduated: false, firstSeen: Date.now(), lastTs: 0, lastEventAt: Date.now(),
       // 5-minute window as an array with a moving head, plus running totals kept in step with it
       w5: [], w5h: 0, buys: 0, sells: 0, vol5: 0, wallets: new Map(), // wallet -> { q, nb, ns }
-      mins: [], vol60: 0, hours: [], vol24: 0, tape: [] };
+      mins: [], minW: new Set(), vol60: 0, hours: [], vol24: 0, tape: [] };
   }
 
   pool(id, program) {
@@ -212,8 +213,11 @@ export class Market {
     p.tape.push(t); if (p.tape.length > TAPE) p.tape.shift();
     const minute = Math.floor(ev.at / 60e3);
     let bucket = p.mins[p.mins.length - 1];
-    if (!bucket || bucket.m !== minute) p.mins.push(bucket = { m: minute, open: p.price, q: 0, b: 0, s: 0 });
+    // u: wallets seen trading in the minute, n: buys minus sells in quote. Both feed the Traction list (lib/traction.js)
+    if (!bucket || bucket.m !== minute) { p.mins.push(bucket = { m: minute, open: p.price, q: 0, b: 0, s: 0, u: 0, n: 0 }); p.minW.clear(); }
     bucket.q += quote; p.vol60 += quote;
+    bucket.n = (bucket.n || 0) + (t.b ? quote : -quote);
+    if (t.w && !p.minW.has(t.w)) { p.minW.add(t.w); bucket.u = (bucket.u || 0) + 1; }
     if (t.b) bucket.b++; else bucket.s++; // buy and sell counts, for the Volume list's buy/sell ratio
     const hour = Math.floor(ev.at / 3600e3);
     let hb = p.hours[p.hours.length - 1];
@@ -306,6 +310,7 @@ export class Market {
       // launch bundle found by this server (a graduated pump.fun coin keeps its curve's launch)
       const lb = flip ? null : this.launchBundles?.row(p.program === 'pumpswap' ? 'pump:' + tokMint : p.id, tokMint);
       const flags = this.flags(p, { flip, liq, mcap, vol5, wallets, trades: buys + sells, lb });
+      const tr = this.traction(p, now);
       out.push({
         id: p.id, program: p.program, venue: this.venue(p), mint: tokMint,
         sym: tok.symbol || (!flip && p.createdName?.symbol) || short(tokMint), name: tok.name || (!flip && p.createdName?.name) || '', icon: tok.icon || null,
@@ -323,6 +328,9 @@ export class Market {
         links: tok.links || null, // { x, web, tg } set by the coin's creator in its metadata (unverified)
         vol5: vol5 * qUsd, vol60: vol60 * qUsd, vol24: vol24 * qUsd, buys5: flip ? sells : buys, sells5: flip ? buys : sells,
         traders5: wallets.size, // unique wallets; Pump.fun, PumpSwap and DBC name the trader, LaunchLab logs do not
+        // the last 5 minutes against the 25 before: traders and volume as multiples of that baseline (null while
+        // the baseline isn't known), and buys minus sells of the launched token in USD
+        trG: tr.trG, volG: tr.volG, net5: (flip ? -tr.net : tr.net) * qUsd,
         chg5: chg(p.price, first5),
         chg60: chg(p.price, first60),
         chg24: chg(p.price, first24),
@@ -340,6 +348,28 @@ export class Market {
     for (const r of out) { const h = hi.get(r.mint); if (r.ath > (h?.ath || 0)) hi.set(r.mint, r); }
     for (const r of out) { const h = hi.get(r.mint); if (h && h !== r) { r.ath = h.ath; r.athAt = h.athAt; } if (r.ath && r.mcap > r.ath) { r.ath = r.mcap; r.athAt = r.lastTs; } }
     return out;
+  }
+
+  // How a pool's last 5 minutes compare with the 25 before them, from its 1-minute buckets: wallets trading
+  // (trader-minutes: a wallet active in 3 of the minutes counts 3 times on both sides of the comparison) and
+  // volume, as multiples of the earlier per-5-minute average, plus buys minus sells in quote. Growth is null
+  // when the earlier minutes weren't watched: the pool was first seen under 10 minutes ago without its launch
+  // being seen (the server just started, or it only now traded enough to be tracked), or the buckets come from
+  // a snapshot saved before they counted wallets. A coin whose launch was seen has a true baseline of nothing.
+  traction(p, now) {
+    const mNow = Math.floor(now / 60e3);
+    let u5 = 0, q5 = 0, net = 0, uB = 0, qB = 0, known = true;
+    for (const x of p.mins) {
+      const age = mNow - x.m;
+      if (age < 5) { u5 += x.u || 0; q5 += x.q; net += x.n || 0; }
+      else if (age < 30) { if (x.u == null) known = false; uB += x.u || 0; qB += x.q; }
+    }
+    const from = Math.max(p.firstSeen, this.startedAt), launched = p.created && p.created >= from - 60e3;
+    const span = Math.min(25, (now - from) / 60e3 - 5); // minutes of baseline actually watched
+    if (!known || (span < 5 && !launched)) return { trG: null, volG: null, net };
+    const parts = Math.max(1, span / 5), price = this.prices.get(p.quoteMint) || 0;
+    // smoothed, so 2 traders becoming 6 isn't "3x" and a launch isn't "100x": +20 trader-minutes and +$500 on both sides
+    return { trG: (u5 + 20) / (uB / parts + 20), volG: (q5 * price + 500) / (qB * price / parts + 500), net };
   }
 
   // Reasons a pool does not look like genuine trading by real users (empty list = looks genuine).

@@ -158,69 +158,121 @@ export function createAccountLoader(rpc) {
   return { get, forget: k => cache.delete(k), size: () => cache.size, backlog: () => pending.size };
 }
 
-// One websocket, one logsSubscribe per program; reconnects with backoff and on silence.
-export function createLogStream({ url, programs, onLogs, onStatus }) {
-  let ws = null, lastMsg = 0, attempts = 0, stopped = false, retryTimer = null;
-  const state = { connected: false, reconnects: 0, since: 0 };
-  function connect() {
-    const subNames = new Map(), reqNames = new Map();
-    ws = new WebSocket(url);
-    ws.onopen = () => {
-      attempts = 0; lastMsg = Date.now(); state.connected = true; state.since = Date.now();
+/// Log subscriptions (one logsSubscribe per program) over a websocket that is replaced before it can be cut.
+//
+// The public RPC closes every websocket after roughly 20-40 seconds (code 1006), whatever it carries; waiting
+// for that and reconnecting loses about a second of swaps each time. So a connection is only used for
+// `rotateMs`: a replacement is opened and subscribed first, both deliver for a moment (a notification seen on
+// both is passed on once), then the old one is closed. A connection that is cut anyway, with no replacement
+// ready, reconnects with backoff as before, and a silent one is closed by the watchdog.
+//
+// The same check drops the RPC's own repeats: the public RPC delivers close to half of all notifications twice
+// on one subscription (same signature, slot and logs), which used to count those swaps twice.
+// rotateMs = 0 turns rotation off (paid endpoints that keep connections open).
+export function createLogStream({ url, programs, onLogs, onStatus, rotateMs = 12000, overlapMs = 250, WebSocketImpl = globalThis.WebSocket }) {
+  let active = null, standby = null, lastMsg = 0, attempts = 0, stopped = false, retryTimer = null, rotateTimer = null;
+  const state = { connected: false, reconnects: 0, rotations: 0, duplicates: 0, since: 0 };
+  const names = Object.keys(programs);
+  // notifications already passed on (two generations, swapped every 30s)
+  let seen = new Set(), seenOld = new Set();
+  const seenTimer = setInterval(() => { seenOld = seen; seen = new Set(); }, 30000).unref();
+  const first = key => {
+    if (seen.has(key) || seenOld.has(key)) { state.duplicates++; return false; }
+    seen.add(key); return true;
+  };
+  function open(replacing) {
+    const c = { ws: new WebSocketImpl(url), subNames: new Map(), reqNames: new Map(), ready: false, retired: false };
+    if (replacing) standby = c;
+    c.ws.onopen = () => {
+      lastMsg = Date.now();
       let id = 1;
-      for (const [name, program] of Object.entries(programs)) {
-        reqNames.set(id, name);
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id: id++, method: 'logsSubscribe', params: [{ mentions: [program] }, { commitment: 'processed' }] }));
+      for (const name of names) {
+        c.reqNames.set(id, name);
+        c.ws.send(JSON.stringify({ jsonrpc: '2.0', id: id++, method: 'logsSubscribe', params: [{ mentions: [programs[name]] }, { commitment: 'processed' }] }));
       }
-      onStatus?.('connected');
     };
-    ws.onmessage = e => {
+    c.ws.onmessage = e => {
+      // a replaced connection keeps delivering until the RPC answers its close: its job is done, skip the parsing
+      if (c.done) return;
       lastMsg = Date.now();
       const data = e.data;
       // failed transactions are a large share of launchpad traffic and are thrown away anyway:
       // recognise them from the raw text and skip parsing the whole notification
-      if (data.includes('"logsNotification"') && !data.includes('"err":null')) {
+      let fresh = false; // already checked against the notifications passed on
+      if (data.includes('"logsNotification"')) {
         const sub = /"subscription":(\d+)/.exec(data);
-        if (sub) { onLogs(subNames.get(+sub[1]), null, [], true); return; }
+        if (!data.includes('"err":null')) {
+          // only the connection in charge counts them, so an overlap doesn't count them twice
+          if (sub) { if (c === active || !active) onLogs(c.subNames.get(+sub[1]), null, [], true); return; }
+        } else {
+          // a repeat is dropped before it is parsed: the public RPC sends close to half of all notifications twice
+          const sig = sub && /"signature":"([1-9A-HJ-NP-Za-km-z]+)"/.exec(data);
+          if (sig) { if (!first(c.subNames.get(+sub[1]) + ':' + sig[1])) return; fresh = true; }
+        }
       }
       const m = JSON.parse(data);
       if (m.id) {
-        if (m.error) onStatus?.('subscribe failed: ' + reqNames.get(m.id) + ' ' + m.error.message);
-        else subNames.set(m.result, reqNames.get(m.id));
+        if (m.error) onStatus?.('subscribe failed: ' + c.reqNames.get(m.id) + ' ' + m.error.message);
+        else c.subNames.set(m.result, c.reqNames.get(m.id));
+        if (!c.ready && c.subNames.size === names.length) { c.ready = true; promote(c); }
         return;
       }
       if (m.method !== 'logsNotification') return;
-      const v = m.params.result.value;
-      onLogs(subNames.get(m.params.subscription), v.signature, v.logs || [], v.err, m.params.result.context?.slot);
+      const v = m.params.result.value, name = c.subNames.get(m.params.subscription);
+      if (fresh || first(name + ':' + v.signature)) onLogs(name, v.signature, v.logs || [], v.err, m.params.result.context?.slot);
     };
-    ws.onerror = () => {};
-    ws.onclose = e => {
+    c.ws.onerror = () => {};
+    c.ws.onclose = e => {
+      if (c === standby) standby = null;
+      if (stopped || c.retired) return;
+      if (c !== active) {
+        // a replacement that never got going: the connection in charge carries on, try another shortly
+        if (active) { clearTimeout(rotateTimer); rotateTimer = setTimeout(() => open(true), 2000); return; }
+      } else {
+        active = null;
+        if (standby) return; // its replacement is already on the way and takes over when subscribed
+      }
+      clearTimeout(rotateTimer);
       state.connected = false; state.reconnects++;
-      if (stopped) return;
       onStatus?.('disconnected' + (e?.code ? ' (code ' + e.code + (e.reason ? ', ' + e.reason : '') + ')' : '') + ', retrying');
-      retryTimer = setTimeout(connect, Math.min(30000, 1000 * 2 ** attempts++));
+      retryTimer = setTimeout(() => open(false), Math.min(30000, 1000 * 2 ** attempts++));
     };
   }
-  const watchdog = setInterval(() => { if (ws?.readyState === 1 && Date.now() - lastMsg > 30000) ws.close(); }, 10000);
-  state.close = () => { stopped = true; clearTimeout(retryTimer); clearInterval(watchdog); ws?.close(); };
-  connect();
+  // a subscribed connection takes charge; the one it replaces is closed once both have overlapped
+  function promote(c) {
+    const old = active;
+    active = c; if (standby === c) standby = null;
+    attempts = 0;
+    if (!state.connected) { state.connected = true; state.since = Date.now(); onStatus?.('connected'); }
+    if (old && old !== c) { old.retired = true; state.rotations++; setTimeout(() => { old.done = true; old.ws.close(); }, overlapMs); }
+    clearTimeout(rotateTimer);
+    if (rotateMs > 0) rotateTimer = setTimeout(() => { if (!stopped && active === c && !standby) open(true); }, rotateMs);
+  }
+  const watchdog = setInterval(() => { if (active?.ws.readyState === 1 && Date.now() - lastMsg > 30000) active.ws.close(); }, 10000);
+  state.close = () => {
+    stopped = true; clearTimeout(retryTimer); clearTimeout(rotateTimer); clearInterval(watchdog); clearInterval(seenTimer);
+    active?.ws.close(); standby?.ws.close();
+  };
+  open(false);
   return state;
 }
 
 // Jupiter's free API rate-limits per IP. Every Jupiter call (token info and quote-token prices) goes
 // through this one paced queue, which pauses for 30s whenever Jupiter answers 429.
 const jupiter = (() => {
-  let next = 0, pausedUntil = 0;
+  let next = 0, pausedUntil = 0, gap = 1500;
   const stats = { calls: 0, limited: 0 };
   async function get(url) {
     const slot = Math.max(Date.now(), next, pausedUntil);
-    next = slot + 1500;
+    next = slot + gap;
     if (slot > Date.now()) await sleep(slot - Date.now());
     stats.calls++;
     // a request that never answers must not stall every lookup behind it (the token queue waits on each one)
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) }).catch(e => { stats.timeouts = (stats.timeouts || 0) + 1; throw e; });
-    if (res.status === 429) { stats.limited++; pausedUntil = Date.now() + 30000; throw new Error('rate limited'); }
+    // each 429 widens the gap between calls (up to 10s); it eases back as calls succeed
+    if (res.status === 429) { stats.limited++; gap = Math.min(10000, gap * 1.5); stats.gapMs = Math.round(gap); pausedUntil = Date.now() + 30000; throw new Error('rate limited'); }
     if (!res.ok) throw new Error('HTTP ' + res.status);
+    gap = Math.max(1500, gap * 0.95); stats.gapMs = Math.round(gap);
     return res.json();
   }
   return { get, stats, busy: () => Math.max(next, pausedUntil) - Date.now() };
@@ -229,13 +281,16 @@ export const jupiterStats = jupiter.stats;
 
 // Token symbol/name/icon/launchpad/creation time from Jupiter's token index (100 mints per request), with
 // the coin's own metadata (its launch event, or the link stored on-chain in its mint) as the image fallback.
+// Names don't wait for Jupiter (its free API is rate-limited to a crawl at times): a coin without one is read
+// from the chain straight away through `onchain` (its Token-2022 mint, or its Metaplex metadata account), which
+// costs one batched account read per 100 coins.
 // Coins still missing a name or an image are looked up again every minute (the first retry after 20s).
 // The same metadata file carries the links the creator set (X, website, Telegram): read once per listed coin.
 // Coins on someone's list go first (`hot`); the rest wait in `queue`, which keeps only its newest QUEUE_MAX so a
 // rate-limited Jupiter never leaves a listed coin stuck behind thousands of coins nobody is looking at.
 const IMAGE_RETRY = [20e3, 60e3];
 const QUEUE_MAX = 2000;
-export function createTokenMeta({ metadata, onchainUri } = {}) {
+export function createTokenMeta({ metadata, onchain } = {}) {
   const meta = new Map(), queue = new Set(), hot = new Set();
   const next = new Map(); // mint -> { n, at }: when it may be looked up again
   const statsAt = new Map(); // mint -> last holder-count refresh
@@ -246,19 +301,38 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
   const merge = (id, m) => meta.set(id, { ...(meta.get(id) || {}), ...m });
   const cap = (map, n) => { while (map.size > n) map.delete(map.keys().next().value); };
 
+  // name and symbol from the chain, for a coin that has neither yet. Tried up to 4 times, further apart each time
+  // (a coin's metadata account can appear a moment after its first trade); a failed read doesn't use up a try.
+  const nameTry = new Map(); // mint -> { n, at }
+  const chain = { asked: 0, named: 0, none: 0, failed: 0 };
+  function fromChain(id) {
+    if (!onchain || meta.get(id)?.symbol) return;
+    const t = nameTry.get(id) || { n: 0, at: 0 };
+    if (t.n >= 4 || Date.now() < t.at) return;
+    t.n++; t.at = Date.now() + 30e3 * t.n;
+    nameTry.set(id, t); cap(nameTry, 100000);
+    chain.asked++;
+    onchain(id).then(m => {
+      if (!m) { chain.none++; return; }
+      const cur = meta.get(id) || {};
+      if ((m.symbol || m.name) && !cur.symbol) { merge(id, { symbol: m.symbol || m.name, name: cur.name || m.name || m.symbol }); chain.named++; }
+      if (m.uri && !uris.has(id)) { uris.set(id, m.uri); cap(uris, 50000); }
+    }).catch(() => { chain.failed++; t.n--; t.at = Date.now() + 10e3; });
+  }
+
   // the coin's own metadata JSON -> image, for coins Jupiter hasn't indexed yet or indexed without a logo.
   // The metadata link comes from the launch event, or else from the coin's mint account on-chain.
   function fromUri(id) {
     const m = meta.get(id);
     if (!metadata || (m?.icon && m?.linksAt) || uriBusy.has(id)) return;
-    if (!uris.has(id) && !onchainUri) return;
+    if (!uris.has(id) && !onchain) return;
     uriBusy.add(id); uriQueue.push(id); drain();
   }
   function drain() {
     while (uriActive < 4 && uriQueue.length) {
       const id = uriQueue.shift(); uriActive++;
       (async () => {
-        if (!uris.has(id)) { const u = await onchainUri(id).catch(() => null); if (u) { uris.set(id, u); cap(uris, 50000); } }
+        if (!uris.has(id)) { const u = (await onchain(id).catch(() => null))?.uri; if (u) { uris.set(id, u); cap(uris, 50000); } }
         const md = uris.has(id) ? await metadata(uris.get(id)) : null;
         if (md?.image && !meta.get(id)?.icon) merge(id, { icon: md.image });
         if (md) merge(id, { links: md.links, linksAt: Date.now() });
@@ -284,10 +358,12 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
       for (const id of ids) if (!meta.get(id)?.icon) fromUri(id);
     } catch { ids.forEach(id => (wasHot.has(id) ? hot : queue).add(id)); } // a failed batch keeps its place
     finally { running = false; }
-  }, 500);
+  }, 500).unref(); // never the only thing keeping the process alive (tests)
 
   // a coin with both a name and an image is done; others are looked up, retried after 20s then every minute
   function request(id) {
+    if (!id) return;
+    fromChain(id);
     const m = meta.get(id);
     if (!id || (m?.icon && m?.symbol) || queue.has(id) || hot.has(id)) return;
     const t = next.get(id) || { n: 0, at: 0 };
@@ -328,7 +404,7 @@ export function createTokenMeta({ metadata, onchainUri } = {}) {
     stats: () => {
       let icons = 0, links = 0;
       for (const m of meta.values()) { if (m.icon) icons++; if (m.links) links++; }
-      return { tokens: meta.size, withImage: icons, withLinks: links, lookupQueue: queue.size, lookupListed: hot.size, metadataLinks: uris.size };
+      return { tokens: meta.size, withImage: icons, withLinks: links, namesFromChain: chain, lookupQueue: queue.size, lookupListed: hot.size, metadataLinks: uris.size };
     },
   };
 }

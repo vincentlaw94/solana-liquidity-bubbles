@@ -3,10 +3,16 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): Trending, Top volume, Breakout, Volume, or Panels (lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list, up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
+- **List view** (default): Trending, Traction, Top volume, Breakout, Volume, or Panels (lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list, up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.
+- **Traction list**: coins gaining traders right now. It compares the wallets trading a coin in the last 5 minutes
+  with the 25 before, and lists the ones whose crowd is growing while more is bought than sold, with Trader growth
+  and Net flow columns.
+- **Traders view**: the most active wallets of the last hour and the coins each is trading. Click a wallet (there, in
+  an open coin's traders, or in its live swaps) for everything it traded; an open coin shows its biggest traders and
+  which other coins the same wallets are in.
 - **Coverage**: Pump.fun (bonding curve and coins graduated to the Pump AMM), Raydium LaunchLab
   (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags, Moonshot and others).
 - **Genuine only filter**: hides rug pulls, wash trading, self-trading, active mint/freeze authority,
@@ -74,6 +80,11 @@ layouts, the HTTP and WebSocket API, the trending score, the genuine-trading rul
 how to add another launchpad.
 
 ## Limits
+
+- Coin names are read from the chain, so they show even when Jupiter's free API is rate-limiting; logos, holder
+  counts and coin ages still come from Jupiter and can take a while to fill in.
+- The Traders view and the Traction list need the trader's wallet, which LaunchLab swaps don't carry on the public
+  feed. Trader totals start empty each time the server starts.
 
 - State is kept in memory and saved to `stream/data/snapshot.json.gz` every minute and on Ctrl+C, so a restart picks up
   the 1h/24h figures and bundle results where they were. Swaps made while the server is off are missed.

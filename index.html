@@ -394,6 +394,39 @@ a.tl svg { width: 13px; height: 13px; }
 #tip h3 .logo, #tip h3 .badge { width: 22px; height: 22px; font-size: 10px; }
 footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: auto; }
 
+/* Traders view, the trader card and the wallet / coin chips used across them */
+#tradersView { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
+#tradersView[hidden] { display: none; }
+.tv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.tv-bar .tv-note { margin-left: auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#tradersView .list-scroll { flex: 1; min-height: 0; overflow: auto; }
+table.traders { min-width: 860px; }
+table.traders th { padding: 9px 12px; font-weight: 500; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+table.traders td { padding: 6px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; text-align: right; }
+table.traders tbody tr:hover td, table.traders tr.sel td { background: var(--raise); }
+table.traders tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+table.traders td.msg { text-align: left; color: var(--muted); padding: 16px 12px; white-space: normal; }
+.wbtn { all: unset; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--fg); border-bottom: 1px dotted var(--muted); }
+.wbtn:hover, .wbtn:focus-visible { color: var(--accent); border-bottom-color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.cchip { font: inherit; font-size: 11px; line-height: 1.5; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--fg); cursor: pointer; white-space: nowrap; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+.cchip.up { border-color: color-mix(in srgb, var(--buy) 60%, transparent); }
+.cchip.down { border-color: color-mix(in srgb, var(--sell) 60%, transparent); }
+.cchip:hover:not(:disabled), .cchip:focus-visible { background: var(--raise); }
+.cchip:disabled { cursor: default; color: var(--muted); border-style: dashed; }
+.cchip small { color: var(--muted); margin-left: 4px; }
+.bundle-box .bsum b.up { color: var(--buy); }
+.bundle-box .bsum b.down { color: var(--sell); }
+table.bw.nums th:nth-child(2), table.bw.nums td:nth-child(2) { text-align: right; }
+table.bw td.up { color: var(--buy); }
+table.bw td.down { color: var(--sell); }
+table.bw .cchip { max-width: 96px; vertical-align: middle; }
+#traderPanel { min-width: 0; }
+#traderPanel table.bw { table-layout: auto; }
+#traderPanel h2 { font-family: var(--mono); font-size: 18px; }
+.tape-row .who { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.tape-row .who .wbtn { font-size: inherit; }
+
 @media (max-width: 900px) {
   body { grid-template-rows: auto auto; height: auto; }
   main { grid-template-columns: 1fr; }
@@ -415,9 +448,11 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     <div class="seg" role="group" aria-label="View" id="viewSeg">
       <button type="button" data-v="map" aria-pressed="false">Map</button>
       <button type="button" data-v="list" aria-pressed="true">List</button>
+      <button type="button" data-v="traders" aria-pressed="false" title="The most active wallets of the last hour and the coins they are trading">Traders</button>
     </div>
     <div class="seg" role="group" aria-label="Pool list" id="srcSeg">
       <button type="button" data-v="trending" aria-pressed="true">Trending</button>
+      <button type="button" data-v="traction" aria-pressed="false">Traction</button>
       <button type="button" data-v="top" aria-pressed="false">Top volume</button>
       <button type="button" data-v="volume" aria-pressed="false" title="Ranked by volume over the window you pick, from the last minute to the last 24 hours">Volume</button>
       <button type="button" data-v="both" aria-pressed="false" title="Several lists side by side: add, remove and resize panels">Panels</button>
@@ -493,6 +528,25 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
     </div>
     <!-- one table per list (lists side by side in Panels), built by setupPanes() -->
     <div id="listView" hidden></div>
+    <!-- the most active wallets and what they trade (stream/lib/traders.js) -->
+    <div id="tradersView" hidden>
+      <div class="tv-bar">
+        <div class="seg" role="group" aria-label="Rank wallets by" id="tvSort">
+          <button type="button" data-v="usd" aria-pressed="true" title="Most volume traded">Volume</button>
+          <button type="button" data-v="net" aria-pressed="false" title="Bought the most more than they sold">Net buying</button>
+          <button type="button" data-v="coins" aria-pressed="false" title="Trading the most coins">Coins</button>
+          <button type="button" data-v="trades" aria-pressed="false" title="Most swaps">Swaps</button>
+        </div>
+        <label class="ctl check" for="tvBots" title="Show wallets that trade like bots: over 150 swaps in the hour, or 30+ swaps both ways with almost no net position"><input type="checkbox" id="tvBots"> Show bots</label>
+        <span class="tv-note" id="tvNote"></span>
+      </div>
+      <div class="list-scroll">
+        <table class="pools traders">
+          <thead><tr><th>#</th><th class="l">Wallet</th><th>Volume</th><th>Bought</th><th>Sold</th><th>Net</th><th title="Buys / sells">Swaps</th><th>Coins</th><th class="l">Most traded</th><th>Last swap</th></tr></thead>
+          <tbody id="tvBody"><tr><td class="msg" colspan="10">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <aside id="sidePanel">
@@ -509,6 +563,8 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
         <div class="ratio-labels"><span class="up" id="sBuys">buys –</span><span class="down" id="sSells">sells –</span></div>
       </div>
     </section>
+
+    <section id="traderPanel" hidden></section>
 
     <section id="poolPanel">
       <div class="empty">Click a bubble to open the pool and stream its swaps.</div>
@@ -562,7 +618,7 @@ footer { padding: 12px 16px; font-size: 11px; color: var(--faint); margin-top: a
 
 <script>
 // Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
-const LISTS = { trending: 'Trending', top: 'Top volume', both: 'Panels', breakout: 'Breakout', volume: 'Volume' };
+const LISTS = { trending: 'Trending', traction: 'Traction', top: 'Top volume', both: 'Panels', breakout: 'Breakout', volume: 'Volume' };
 // the Volume list's windows (stream/lib/market.js VOL_WINDOWS)
 const VOL_WINDOWS = ['1m', '15m', '30m', '1h', '4h', '12h', '24h'];
 const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
@@ -639,6 +695,9 @@ function fromStream(r, i) {
     id: r.id, rank: i + 1, ranks: r.ranks || null, vols: r.vols || null, bs: r.bs || null, setup: r.setup ?? null, program: r.program, addr: r.mint, name: r.sym + ' / ' + r.quote, sym: r.sym, quote: r.quote, dex: r.venue, liq: r.liq,
     vol24: r.vol24, vol1: r.vol60, vol5: r.vol5, chg:{ m5: r.chg5, h1: r.chg60, h24: r.chg24 }, traders5: r.traders5, score: r.score,
     buys5: r.buys5, sells5: r.sells5, price: r.price, mcap: r.mcap || 0, flags: r.flags || [],
+    // Traction: its score (on the Traction list), traders and volume in the last 5 minutes as multiples of the 25
+    // before (null until the coin has been watched long enough), and buys minus sells over those 5 minutes
+    trac: r.trac ?? null, trG: r.trG ?? null, volG: r.volG ?? null, net5: r.net5 ?? null,
     created: r.created || 0, born: r.born || 0, firstSeen: r.firstSeen, progress: r.progress, graduated: r.graduated,
     icon: realImage(r.icon),
     mint: r.mint,
@@ -728,6 +787,8 @@ function streamConnect() {
       if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
       const rows = applySnapshot(m);
       if (rows.length) { ingestRecords(rows.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); }
+      // a coin opened from a trader's list that wasn't on this list: the server has now added it
+      if (pendingOpen && byId.has(pendingOpen)) { const n = byId.get(pendingOpen); pendingOpen = null; select(n); }
       // the open coin moved pools (bonding curve -> AMM after graduation): follow it
       const sel = state.selected;
       if (sel && (sel.dying || !byId.has(sel.id))) {
@@ -740,7 +801,15 @@ function streamConnect() {
       if (state.selected?.id !== m.id) return;
       tradeRows = m.trades.map(t => tapeRow(t, false)); tradeFor = state.selected.addr; renderTape(true);
     } else if (m.type === 'event') pushFeed(m);
-    else if (m.type === 'ath') { athCoins = m.coins; renderAth(); }
+    else if (m.type === 'ath') {
+      // deltas: coins that changed, and the order when it changed (reset: the whole watch)
+      if (m.reset) athByMint.clear();
+      for (const c of m.coins) athByMint.set(c.mint, c);
+      if (m.order) athOrder = m.order;
+      athCoins = athOrder.map(mint => athByMint.get(mint)).filter(Boolean);
+      if (athByMint.size > athOrder.length * 2) { const keep = new Set(athOrder); for (const k of athByMint.keys()) if (!keep.has(k)) athByMint.delete(k); }
+      renderAth();
+    }
     else if (m.type === 'breakout') renderBreakout(m.stats);
     else if (m.type === 'pins') mergePins(m.pins, m.unpinned);
   };
@@ -1302,6 +1371,125 @@ async function loadHolders(n) {
 // the open coin's holders, reloaded every 10s while the panel shows them (the server rereads an open coin every 20s)
 setInterval(() => { if (state.selected && $('holdersBox')) loadHolders(state.selected); }, 10000);
 
+// ---------- traders: who is trading what (stream/lib/traders.js) ----------
+// The Traders view lists the most active wallets of the last hour and the coins each is in. A wallet anywhere
+// (that list, an open coin's traders, its live swaps) opens the trader card: every coin the wallet traded.
+// An open coin shows its biggest traders and the other coins those same wallets are in.
+const tv = { sort: 'usd', bots: false, data: null, loading: false };
+const signedUsd = v => !isFinite(v) ? '–' : (v > 0 ? '+' : v < 0 ? '−' : '') + usd(Math.abs(v));
+const sinceMins = d => Math.min(d.windowMin, Math.max(1, Math.round((Date.now() - (d.since || 0)) / 60e3)));
+const walletBtn = w => '<button type="button" class="wbtn" data-wallet="' + esc(w) + '" title="See what this wallet is trading">' + esc(short(w)) + '</button>';
+const BOT_TIP = 'Trades like a bot: over 150 swaps in the hour, or 30+ swaps both ways with almost no net position';
+const botBadge = b => b ? ' <span class="role" title="' + BOT_TIP + '">bot</span>' : '';
+// a coin a wallet traded: green outline when it bought more than it sold, red when it sold more
+function coinChip(c) {
+  const k = c.coin || {}, net = c.netUsd;
+  const title = (k.name ? k.name + ' · ' : '') + 'bought ' + usd(c.buyUsd) + ', sold ' + usd(c.sellUsd) + (k.unlisted ? ' · not on the lists right now' : ' · click to open');
+  return '<button type="button" class="cchip ' + cls(net) + '" data-pool="' + esc(c.pool) + '"' + (k.unlisted ? ' disabled' : '') + ' title="' + esc(title) + '">' + esc(k.sym || short(c.pool)) + '</button>';
+}
+// open a coin by pool id: straight away if it is on this list, otherwise the server adds it and it opens when it arrives
+let pendingOpen = null;
+function openPool(id) {
+  const n = byId.get(id);
+  if (n) { pendingOpen = null; select(n); return; }
+  pendingOpen = id; streamSend({ type: 'select', id });
+}
+async function getJson(path) {
+  try { const res = await fetch(IMG_BASE + path); return { status: res.status, body: await res.json().catch(() => null) }; }
+  catch { return { status: 0, body: null }; }
+}
+async function loadTraders() {
+  if (state.view !== 'traders' || tv.loading) return;
+  tv.loading = true;
+  const { status, body } = await getJson('/api/traders?limit=100&sort=' + tv.sort + '&bots=' + (tv.bots ? 1 : 0));
+  tv.loading = false;
+  tv.data = status === 200 ? body : { error: body?.error || (status ? 'Couldn’t load the traders.' : 'Chain stream not running.') };
+  renderTraders();
+}
+function renderTraders() {
+  const d = tv.data, body = $('tvBody');
+  if (!d || state.view !== 'traders') return;
+  if (d.error) { setT($('tvNote'), ''); setH(body, '<tr><td class="msg" colspan="10">' + esc(d.error) + '</td></tr>'); return; }
+  setT($('tvNote'), 'Last ' + sinceMins(d) + ' min · ' + d.stats.wallets.toLocaleString() + ' wallets followed');
+  if (!d.traders.length) { setH(body, '<tr><td class="msg" colspan="10">No swaps yet. Wallets appear here as they trade the coins on the lists.</td></tr>'); return; }
+  setH(body, d.traders.map((w, i) =>
+    '<tr class="' + (w.wallet === traderFor ? 'sel' : '') + '"><td>' + (i + 1) + '</td>' +
+    '<td class="l">' + walletBtn(w.wallet) + botBadge(w.bot) + '</td>' +
+    '<td>' + usd(w.usd) + '</td><td class="up">' + usd(w.buyUsd) + '</td><td class="down">' + usd(w.sellUsd) + '</td>' +
+    '<td class="' + cls(w.netUsd) + '">' + signedUsd(w.netUsd) + '</td>' +
+    '<td><span class="up">' + w.buys + '</span> / <span class="down">' + w.sells + '</span></td>' +
+    '<td>' + w.coins + '</td>' +
+    '<td class="l"><div class="chips">' + w.top.map(coinChip).join('') + (w.coins > w.top.length ? '<small class="empty">+' + (w.coins - w.top.length) + '</small>' : '') + '</div></td>' +
+    '<td>' + ago(w.last) + '</td></tr>').join(''));
+}
+setInterval(() => { if (!document.hidden) loadTraders(); }, 4000);
+
+// the trader card (side panel): one wallet's coins over the window
+let traderFor = null;
+function openTrader(w) {
+  traderFor = w || null;
+  const el = $('traderPanel');
+  el.hidden = !traderFor;
+  if (!traderFor) { el._h = null; el.innerHTML = ''; renderTraders(); return; }
+  if (!state.panel) setPanel(true);
+  setH(el, traderHead(traderFor, null) + '<div class="empty">Loading…</div>');
+  el.scrollIntoView({ block: 'nearest' });
+  loadTrader(); renderTraders();
+}
+const traderHead = (w, r) => '<div class="pool-head"><div><div class="label">Trader' + botBadge(r?.bot) + '</div><h2>' + esc(short(w)) + '</h2></div>' +
+  '<button type="button" class="close" data-close-trader aria-label="Close trader">✕</button></div>' +
+  '<div class="ca"><span class="lbl">Wallet</span><code>' + esc(w) + '</code>' + copyButtonHtml(w, 'wallet') + '</div>';
+async function loadTrader() {
+  const w = traderFor;
+  if (!w) return;
+  const { status, body: r } = await getJson('/api/trader?wallet=' + encodeURIComponent(w));
+  if (traderFor !== w) return;
+  const el = $('traderPanel'), links = '<div class="links"><a href="https://solscan.io/account/' + encodeURIComponent(w) + '" target="_blank" rel="noopener">Solscan ↗</a>' +
+    '<a href="https://gmgn.ai/sol/address/' + encodeURIComponent(w) + '" target="_blank" rel="noopener">GMGN ↗</a></div>';
+  if (status !== 200 || !r) { setH(el, traderHead(w, null) + '<div class="empty">' + esc(status === 404 ? 'No swaps from this wallet in the last hour.' : r?.error || 'Couldn’t load this wallet.') + '</div>' + links); return; }
+  setH(el, traderHead(w, r) +
+    '<dl class="kv"><dt>Volume · last ' + sinceMins(r) + ' min</dt><dd>' + usd(r.usd) + '</dd>' +
+    '<dt>Bought</dt><dd class="up">' + usd(r.buyUsd) + '</dd><dt>Sold</dt><dd class="down">' + usd(r.sellUsd) + '</dd>' +
+    '<dt>Net</dt><dd class="' + cls(r.netUsd) + '">' + signedUsd(r.netUsd) + '</dd>' +
+    '<dt>Swaps</dt><dd>' + r.buys + ' buys / ' + r.sells + ' sells</dd><dt>Coins</dt><dd>' + r.coins + '</dd></dl>' +
+    '<table class="bw nums"><thead><tr><th>Coin</th><th>Bought</th><th>Sold</th><th>Net</th><th title="Buys / sells">Swaps</th></tr></thead><tbody>' +
+    r.coinList.map(c => '<tr title="Last swap ' + ago(c.last) + ' ago"><td>' + coinChip(c) + '</td><td>' + usd(c.buyUsd) + '</td><td>' + usd(c.sellUsd) + '</td>' +
+      '<td class="' + cls(c.netUsd) + '">' + signedUsd(c.netUsd) + '</td><td>' + c.buys + ' / ' + c.sells + '</td></tr>').join('') +
+    '</tbody></table>' + links);
+}
+setInterval(() => { if (traderFor && !document.hidden) loadTrader(); }, 5000);
+
+// an open coin's traders, and where else they are (reloaded every 10s while the panel shows them)
+let poolTradersFor = null;
+async function loadPoolTraders(n) {
+  const box = $('tradersBox');
+  if (!box || !n) return;
+  poolTradersFor = n.id;
+  const { status, body: r } = await getJson('/api/pool-traders?id=' + encodeURIComponent(n.id));
+  if (poolTradersFor !== n.id || !box.isConnected) return;
+  if (status !== 200 || !r) { setH(box, '<div class="label">Traders</div><div class="bsum">' + esc(r?.error || 'Couldn’t load the traders.') + '</div>'); return; }
+  setH(box, '<div class="label">Traders · last ' + sinceMins(r) + ' min</div>' +
+    (r.traders ? '<div class="bsum"><b>' + r.traders.toLocaleString() + '</b> wallet' + (r.traders > 1 ? 's' : '') + ' · <b class="up">' + r.buyers + '</b> bought more than sold · <b class="down">' + r.sellers + '</b> sold more' +
+        (r.bots ? ' · ' + r.bots + ' bot-like' : '') + '</div>' +
+      '<table class="bw nums"><thead><tr><th>Wallet</th><th>Bought</th><th>Sold</th><th>Net</th><th title="Coins this wallet traded in the window">Coins</th></tr></thead><tbody>' +
+      r.top.map(t => '<tr><td>' + walletBtn(t.wallet) + botBadge(t.bot) + '</td><td>' + usd(t.buyUsd) + '</td><td>' + usd(t.sellUsd) + '</td>' +
+        '<td class="' + cls(t.netUsd) + '">' + signedUsd(t.netUsd) + '</td><td>' + t.coins + '</td></tr>').join('') + '</tbody></table>'
+      : '<div class="bsum">No swaps with a wallet seen yet' + (n.program === 'launchlab' ? ' (LaunchLab swaps don’t name the trader on the public feed)' : '') + '.</div>') +
+    (r.also?.length ? '<div class="label">Its traders are also in</div><div class="chips">' + r.also.map(o => {
+        const k = o.coin || {};
+        const title = o.wallets + ' of this coin’s traders also traded ' + (k.sym || 'it') + ' (' + o.buyers + ' bought more than sold), ' + usd(o.usd) + ' between them' + (k.unlisted ? ' · not on the lists right now' : ' · click to open');
+        return '<button type="button" class="cchip ' + cls(o.netUsd) + '" data-pool="' + esc(o.pool) + '"' + (k.unlisted ? ' disabled' : '') + ' title="' + esc(title) + '">' + esc(k.sym || short(o.pool)) + '<small>' + o.wallets + '</small></button>';
+      }).join('') + '</div>' : ''));
+}
+setInterval(() => { if (state.selected && $('tradersBox') && !document.hidden) loadPoolTraders(state.selected); }, 10000);
+document.addEventListener('click', e => {
+  const w = e.target.closest('button[data-wallet]');
+  if (w) { e.stopPropagation(); openTrader(w.dataset.wallet); return; }
+  const c = e.target.closest('button.cchip[data-pool]');
+  if (c) { openPool(c.dataset.pool); return; }
+  if (e.target.closest('[data-close-trader]')) openTrader(null);
+});
+
 // ---------- hide coins ----------
 const ICON_HIDE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 2l12 12"/><path d="M6.6 3.6A6.8 6.8 0 0 1 8 3.5c3.6 0 6 4.5 6 4.5a11 11 0 0 1-1.9 2.4M4.2 4.9C2.8 6 2 8 2 8s2.4 4.5 6 4.5c1 0 1.9-.3 2.7-.7"/><path d="M6.6 6.7a2 2 0 0 0 2.8 2.7"/></svg>';
 function hideButtonHtml(n) {
@@ -1566,6 +1754,18 @@ const COLUMNS = {
       const t = n.ddAt ? 'Down 80% from its ' + usd(n.ath) + ' high since ' + ago(n.ddAt) + ' ago; a new high resets it' : n.ath ? 'From its ' + usd(n.ath) + ' high, ' + ago(n.athAt) + ' ago' : '';
       if (td.title !== t) td.title = t;
     } },
+  // Traction list (stream/lib/traction.js): its score, and the last 5 minutes against the 25 before
+  trac: { label: 'Traction', sort: n => n.trac ?? -Infinity,
+    set: (td, n) => { setT(td, n.trac != null ? n.trac.toFixed(1) : '–'); if (!td.title) td.title = 'Traction score: how many wallets are trading, how fast they and the volume are growing, and how much more is bought than sold'; } },
+  trG: { label: 'Trader growth', sort: n => n.trG ?? -Infinity,
+    set: (td, n) => {
+      setT(td, n.trG != null ? '×' + n.trG.toFixed(n.trG >= 10 ? 0 : 1) : '–'); setC(td, n.trG >= 1.25 ? 'up' : n.trG != null && n.trG < 0.8 ? 'down' : '');
+      const t = n.trG != null ? 'Wallets trading in the last 5 minutes against an average 5 minutes of the 25 before' + (n.volG != null ? '; volume ×' + n.volG.toFixed(1) + ' on the same comparison' : '')
+        : 'Not watched long enough to compare yet (about 10 minutes)';
+      if (td.title !== t) td.title = t;
+    } },
+  net5: { label: 'Net flow 5m', sort: n => n.net5 ?? -Infinity,
+    set: (td, n) => { setT(td, n.net5 != null ? signedUsd(n.net5) : '–'); setC(td, cls(n.net5)); if (!td.title) td.title = 'Bought minus sold over the last 5 minutes'; } },
   coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
     set: (td, n) => {
       setT(td, n.born ? ago(n.born) : '–');
@@ -1594,10 +1794,11 @@ state.columns = normalizeColumns(null);
 // the Breakout list (and its panels) always shows its own columns, right after the token; Volume its window's volume
 const BREAKOUT_COLUMNS = ['setup', 'sinceFlag'];
 const VOLUME_COLUMNS = ['volW']; // the window's volume, with its buys and sells
+const TRACTION_COLUMNS = ['trac', 'traders', 'trG', 'net5']; // why the coin is on the Traction list
 // and "Since pinned" while any coin is pinned
 const shownColumns = pane => {
   const cols = state.columns.filter(c => c.on).map(c => c.key);
-  const extra = (pane.breakout ? BREAKOUT_COLUMNS : pane.list === 'volume' ? VOLUME_COLUMNS : []).filter(k => !cols.includes(k));
+  const extra = (pane.breakout ? BREAKOUT_COLUMNS : pane.list === 'volume' ? VOLUME_COLUMNS : pane.list === 'traction' ? TRACTION_COLUMNS : []).filter(k => !cols.includes(k));
   if (pinsShown() && !cols.includes('sincePin') && nodes.some(n => n.pin)) extra.unshift('sincePin');
   cols.splice(cols.indexOf('token') + 1, 0, ...extra);
   return cols;
@@ -1606,7 +1807,7 @@ const shownColumns = pane => {
 // One table per list. In Panels, each panel the viewer added is a table of its own list, ranked by that list (up to
 // MAX_PANELS: the same list twice is fine, e.g. Volume over 1m next to Volume over 4h); otherwise one table shows the
 // whole list. Panels, their sizes and which are collapsed are saved with the other settings.
-const PANEL_LISTS = { trending: 'Trending', top: 'Top volume', breakout: 'Breakout', volume: 'Volume' }, MAX_PANELS = 6;
+const PANEL_LISTS = { trending: 'Trending', traction: 'Traction', top: 'Top volume', breakout: 'Breakout', volume: 'Volume' }, MAX_PANELS = 6;
 const panelLabel = c => PANEL_LISTS[c.list] + (c.list === 'volume' ? ' · ' + c.window : '');
 // How each list is built and ranked (stream/server.js and lib/breakout.js), shown on hover of a panel's ⓘ and of
 // the list tabs
@@ -1616,6 +1817,11 @@ function listInfo(list, win) {
     'Needs 8+ swaps in the last 5 minutes and $500+ liquidity.\n' +
     'Ranked by a momentum score, highest first:\nlog(5m volume) × (1 + pace, up to 4×) × (0.6 + buy share) × (1 + traders / 40, up to 2×) × (1 + 5m price rise / 50, up to 2×).\n' +
     'Pace: the last 5 minutes’ volume against the coin’s own 5-minute average over the past hour.' + LIST_INFO_ALL;
+  if (list === 'traction') return 'Traction: coins gaining traders right now. Trending follows volume; this follows how fast a coin’s crowd is growing.\n' +
+    'Needs 8+ wallets and $300+ volume in the last 5 minutes, $1K+ liquidity, more bought than sold, and a price not down over 15% in 5 minutes. ' +
+    'Once a coin has been watched for 10 minutes it also needs 25% more traders than an average 5 minutes of the 25 before.\n' +
+    'Ranked by a traction score, highest first:\nlog(traders) × √(trader growth, up to 10×) × √(volume growth, up to 10×) × (0.5 + net buying’s share of volume) × (1 + 5m price rise / 100, up to 1.5×).\n' +
+    'LaunchLab swaps don’t name the trader on the public feed, so those coins can’t make this list.' + LIST_INFO_ALL;
   if (list === 'top') return 'Top volume: the most traded coins.\nRanked by 24h volume, highest first (ties by 5m volume).\n' +
     'Counts the swaps this server has seen, up to 24h: since it started, or since Clear volume.' + LIST_INFO_ALL;
   if (list === 'volume') return 'Volume' + (win ? ' over ' + win : '') + ': the most traded coins over a window you pick.\n' +
@@ -1812,7 +2018,7 @@ function setPanelWindow(i, w) {
   c.window = w; panelsChanged();
 }
 // "+ Add panel" (Panels only): a list, or Volume over a window
-$('panelMenu').innerHTML = ['trending', 'top', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
+$('panelMenu').innerHTML = ['trending', 'traction', 'top', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
   '<div class="grp"><div class="pm-h">Volume over</div><div class="pm-wins">' +
   VOL_WINDOWS.map(w => '<button type="button" data-add="volume" data-win="' + w + '" aria-label="Volume over ' + w + '">' + w + '</button>').join('') + '</div></div>';
 function panelMenu(open) { $('panelMenu').hidden = !open; $('addPanelBtn').setAttribute('aria-expanded', String(open)); }
@@ -2124,7 +2330,7 @@ function restoreSettings() {
   let s = {};
   try { s = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch {}
   const oneOf = (v, ok, d) => ok.includes(v) ? v : d;
-  state.view = oneOf(s.view, ['map', 'list'], state.view);
+  state.view = oneOf(s.view, ['map', 'list', 'traders'], state.view);
   state.list = oneOf(s.list, Object.keys(LISTS), state.list);
   state.volWindow = oneOf(s.volWindow, VOL_WINDOWS, state.volWindow);
   state.colorBy = oneOf(s.colorBy, ['m5', 'h1', 'h24', 'progress', 'dex'], state.colorBy);
@@ -2144,7 +2350,7 @@ function restoreSettings() {
   if (s.ageOpen && typeof s.ageOpen === 'object') state.ageOpen = Object.fromEntries(AGE_GROUPS.map(([g]) => [g, s.ageOpen[g] !== false]));
   if (Array.isArray(s.pins)) state.pins = s.pins.map(cleanPin).filter(Boolean).slice(0, 200);
   const okSort = v => v && COLUMNS[v.key] && (v.dir === 1 || v.dir === -1) ? { key: v.key, dir: v.dir } : null;
-  const lists = ['trending', 'top', 'breakout', 'volume'];
+  const lists = ['trending', 'top', 'breakout', 'volume', 'traction'];
   if (s.sorts && typeof s.sorts === 'object') for (const l of lists) { const v = okSort(s.sorts[l]); if (v) state.sorts[l] = v; }
   else if (okSort(s.sort)) for (const l of lists) state.sorts[l] = okSort(s.sort); // one sort for every list, saved before sorts were per list
   state.columns = normalizeColumns(s.columns);
@@ -2171,25 +2377,40 @@ function renderBreakout(b) {
 }
 // ---------- ATH watch ----------
 // Coins that reached the Top volume top 10, sent by the server every 2s: its current top 10 first, then the rest.
-let athCoins = [];
+let athCoins = [], athOrder = [];
+const athByMint = new Map();
 function renderAth() {
   const el = $('athWatch');
-  if (!athCoins.length) { setH(el, '<div class="empty">Coins appear here once they reach the top 10 of Top volume.</div>'); return; }
-  const sel = state.selected?.mint;
-  setH(el, athCoins.map(c => {
+  if (!athCoins.length) { el._rows = null; setH(el, '<div class="empty">Coins appear here once they reach the top 10 of Top volume.</div>'); return; }
+  // one button per coin, kept between renders: only the ones whose text changed are touched, and they are only
+  // moved when the order changed (rebuilding a few hundred rows every 2 seconds was this panel's whole cost)
+  if (!el._rows) { el.innerHTML = ''; el._h = null; el._rows = new Map(); }
+  const sel = state.selected?.mint, rows = el._rows, seen = new Set();
+  let prev = null;
+  for (const c of athCoins) {
     const drop = athDrop(c.mcap, c.ath);
     const st = c.ddAt ? '−80% · ' + ago(c.ddAt) : c.mcap >= c.ath ? 'at ATH' : 'ATH ' + ago(c.athAt);
     const tip = c.sym + ': ' + usd(c.mcap) + ' now, high ' + usd(c.ath) + ' (' + new Date(c.athAt).toLocaleString() + ')' +
       (c.ddAt ? '\nFell 80% from it ' + ago(c.ddAt) + ' ago, lowest since ' + usd(c.ddLow) + '. A new high resets the watch.' : '') +
       '\nIn the top 10 ' + (c.rank ? 'now, at #' + c.rank : 'until ' + ago(c.topAt) + ' ago') + ' · best #' + c.bestRank +
-      (c.drawdowns ? ' · 80% drawdowns: ' + c.drawdowns + ', recovered to a new high: ' + c.resets : '');
-    return '<button type="button" data-pool="' + esc(c.pool) + '" data-mint="' + esc(c.mint) + '" title="' + esc(tip) + '"' +
-      (c.rank ? '' : ' class="out"') + ' aria-current="' + (sel === c.mint) + '">' +
-      '<span class="rk">' + (c.rank || '·') + '</span><span class="nm">' + esc(c.sym) + '</span>' +
+      (c.drawdowns ? ' · 80% drawdowns: ' + c.drawdowns + ', recovered to a new high: ' + (c.resets || 0) : '');
+    seen.add(c.mint);
+    let b = rows.get(c.mint);
+    if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.mint = c.mint; rows.set(c.mint, b); }
+    if (b.dataset.pool !== c.pool) b.dataset.pool = c.pool;
+    if (b._tip !== tip) { b._tip = tip; b.title = tip; }
+    setC(b, c.rank ? '' : 'out');
+    const cur = String(sel === c.mint);
+    if (b._cur !== cur) { b._cur = cur; b.setAttribute('aria-current', cur); }
+    setH(b, '<span class="rk">' + (c.rank || '·') + '</span><span class="nm">' + esc(c.sym) + '</span>' +
       '<span class="num">' + usd(c.mcap) + '</span>' +
       '<span class="num ' + (c.ddAt ? 'down' : '') + '">' + (drop > -0.05 ? '0%' : pct(drop)) + '</span>' +
-      '<span class="st' + (c.ddAt ? ' dd' : '') + '">' + st + '</span></button>';
-  }).join(''));
+      '<span class="st' + (c.ddAt ? ' dd' : '') + '">' + st + '</span>');
+    const want = prev ? prev.nextSibling : el.firstChild;
+    if (want !== b) el.insertBefore(b, want);
+    prev = b;
+  }
+  for (const [mint, b] of rows) if (!seen.has(mint)) { b.remove(); rows.delete(mint); }
 }
 setInterval(renderAth, 5000); // the "ago" labels
 $('athWatch').addEventListener('click', e => {
@@ -2310,6 +2531,7 @@ function renderPool(refreshOnly) {
     '<dt>1h volume</dt><dd data-f="vol1">' + usd(n.vol1) + '</dd>' +
     '<dt>5m volume</dt><dd data-f="vol5">' + usd(n.vol5) + '</dd>' +
     (n.traders5 ? '<dt>Traders 5m</dt><dd data-f="traders5">' + n.traders5 + '</dd>' : '') +
+    '<dt title="Bought minus sold over the last 5 minutes">Net flow 5m</dt><dd data-f="net5" class="' + cls(n.net5) + '">' + (n.net5 != null ? signedUsd(n.net5) : '–') + '</dd>' +
     (n.score != null ? '<dt>Trend score</dt><dd data-f="score">' + n.score.toFixed(1) + '</dd>' : '') + '</dl>' +
     (n.progress != null ? '<div class="progress"><span data-f="progressText">' + progressText(n) + '</span><div class="bar"><div data-f="progressBar" style="width:' + (n.progress * 100).toFixed(1) + '%"></div></div></div>' : '') +
     '<div class="changes">' + ['m5', 'h1', 'h24'].map(k => '<div><small>Δ ' + { m5: '5m', h1: '1h', h24: '24h' }[k] + '</small><span data-f="chg_' + k + '" class="' + cls(n.chg[k]) + '">' + pct(n.chg[k]) + '</span></div>').join('') + '</div>' +
@@ -2317,6 +2539,7 @@ function renderPool(refreshOnly) {
     '<div class="ratio-labels"><span class="up" data-f="buys">5m buys ' + n.buys5 + '</span><span class="down" data-f="sells">sells ' + n.sells5 + '</span></div></div>' +
     (n.bundle || n.program === 'pump' || /pump$/.test(n.mint || '') ? '<div class="bundle-box" id="bundleBox"><div class="label">Launch bundle</div><div class="bsum">Loading…</div></div>' : '') +
     (n.mint ? '<div class="bundle-box" id="holdersBox"><div class="label">Top holders</div><div class="bsum">Loading\u2026</div></div>' : '') +
+    '<div class="bundle-box" id="tradersBox"><div class="label">Traders</div><div class="bsum">Loading…</div></div>' +
     '<div class="links">' +
       (n.program === 'pump' ? '<a href="https://pump.fun/coin/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Pump.fun ↗</a>' : '') +
       '<a href="' + esc(axiomUrl(n.addr)) + '" target="_blank" rel="noopener">Axiom ↗</a>' +
@@ -2326,6 +2549,7 @@ function renderPool(refreshOnly) {
   $('closePool').addEventListener('click', () => select(null));
   if ($('bundleBox')) loadBundle(n);
   if ($('holdersBox')) loadHolders(n);
+  loadPoolTraders(n);
   if (tradeFor === n.addr) renderTape(refreshOnly);
 }
 const progressText = n => n.graduated ? 'Bonding curve complete (graduated)' : 'Bonding curve ' + (n.progress * 100).toFixed(1) + '% to graduation';
@@ -2347,6 +2571,7 @@ function refreshPool(n) {
   if (n.whales) put('whaleText', whaleText(n) + '.');
   put('ath', athText(n)); { const e = f('ath'); if (e) setC(e, n.ddAt || (n.ath && athDrop(n.mcap, n.ath) <= -80) ? 'down' : ''); }
   put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
+  { const e = f('net5'); if (e) { setT(e, n.net5 != null ? signedUsd(n.net5) : '–'); setC(e, cls(n.net5)); } }
   if (n.progress != null) { put('progressText', progressText(n)); const b = f('progressBar'); if (b) setS(b, 'width', (n.progress * 100).toFixed(1) + '%'); }
   for (const k of ['m5', 'h1', 'h24']) { const e = f('chg_' + k); if (e) { setT(e, pct(n.chg[k])); setC(e, cls(n.chg[k])); } }
   const r = f('ratio'); if (r) setS(r, 'width', (tx ? 100 * n.buys5 / tx : 50).toFixed(1) + '%');
@@ -2368,7 +2593,8 @@ function renderTape(quiet) {
     const ts = new Date(t.block_timestamp);
     return '<div class="tape-row' + (t.isNew && !quiet ? ' new' : '') + '"><span class="t">' + ts.toLocaleTimeString([], { hour12: false }) + '</span>' +
       '<span class="side ' + (buy ? 'up' : 'down') + '">' + (buy ? 'BUY' : 'SELL') + '</span>' +
-      '<a href="https://solscan.io/tx/' + encodeURIComponent(t.tx_hash) + '" target="_blank" rel="noopener" title="View transaction">' + esc(short(t.tx_from_address) || 'tx ' + short(t.tx_hash)) + '</a>' +
+      '<span class="who">' + (t.tx_from_address ? walletBtn(t.tx_from_address) : '') +
+      '<a href="https://solscan.io/tx/' + encodeURIComponent(t.tx_hash) + '" target="_blank" rel="noopener" title="View transaction">' + (t.tx_from_address ? 'tx ↗' : esc('tx ' + short(t.tx_hash))) + '</a></span>' +
       '<span class="usd ' + (buy ? 'up' : 'down') + '">' + usd(+t.volume_in_usd) + '</span></div>';
   }).join('');
 }
@@ -2510,17 +2736,19 @@ function setHeader(open) {
 $('hdrToggle').addEventListener('click', () => setHeader(!state.headerOpen));
 function setView(v) {
   state.view = v;
-  const list = v === 'list';
-  // map-only controls: colour, layout and size have no effect on the table
-  $('listView').hidden = !list; cv.hidden = list; $('legend').hidden = list; $('groupSeg').hidden = list;
-  $('sizeMode').closest('label').hidden = list; $('colorBy').closest('label').hidden = list;
+  const list = v === 'list', map = v === 'map', traders = v === 'traders';
+  // map-only controls: colour, layout and size have no effect on the tables
+  $('listView').hidden = !list; $('tradersView').hidden = !traders; cv.hidden = !map; $('legend').hidden = !map; $('groupSeg').hidden = !map;
+  $('sizeMode').closest('label').hidden = !map; $('colorBy').closest('label').hidden = !map;
   $('colBtn').hidden = !list;
   if (!list) openColPanel(false);
   tip.hidden = true;
-  if (list) { removeDead(true); renderList(); }
-  else { layoutClusters(); sim.nodes(nodes); sim.alpha(0.6); startFrames(); }
+  if (map) { layoutClusters(); sim.nodes(nodes); sim.alpha(0.6); startFrames(); }
+  else { removeDead(true); if (list) renderList(); else loadTraders(); }
 }
 segment('viewSeg', setView);
+segment('tvSort', v => { tv.sort = v; loadTraders(); });
+$('tvBots').addEventListener('change', e => { tv.bots = e.target.checked; loadTraders(); });
 function syncControls() {
   const press = (id, v) => { for (const b of $(id).querySelectorAll('button')) b.setAttribute('aria-pressed', b.dataset.v === String(v) ? 'true' : 'false'); };
   press('srcSeg', state.list); press('viewSeg', state.view); press('groupSeg', state.group ? '1' : '0');
