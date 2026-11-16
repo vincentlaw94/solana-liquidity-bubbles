@@ -180,7 +180,9 @@ section { padding: 14px 16px; border-bottom: 1px solid var(--line); display: gri
 .feed .t { color: var(--faint); }
 .feed .k { font-size: 10px; font-weight: 500; letter-spacing: .06em; }
 .feed .k.new { color: var(--buy); } .feed .k.grad { color: var(--accent); }
-.feed .k.dd { color: var(--sell); } .feed .k.ath { color: var(--buy); }
+.feed .k.dd { color: var(--sell); } .feed .k.ath { color: var(--buy); } .feed .k.dlmm { color: #c38bff; }
+#dlmmSection table.bw td:first-child { font-weight: 600; }
+#dlmmSection table.bw tr.best td { color: var(--buy); }
 .note { margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
 .why { display: block; color: var(--muted); font-size: 11px; line-height: 1.3; white-space: normal; min-width: 150px; max-width: 190px; }
 .athw { display: grid; gap: 2px; font-size: 12px; font-variant-numeric: tabular-nums; max-height: 300px; overflow-y: auto; }
@@ -420,6 +422,7 @@ table.traders td.msg { text-align: left; color: var(--muted); padding: 16px 12px
 table.bw.nums th:nth-child(2), table.bw.nums td:nth-child(2) { text-align: right; }
 table.bw td.up { color: var(--buy); }
 table.bw td.down { color: var(--sell); }
+table.bw tr.dim td { opacity: .5; }
 table.bw .cchip { max-width: 96px; vertical-align: middle; }
 #traderPanel { min-width: 0; }
 #traderPanel table.bw { table-layout: auto; }
@@ -453,6 +456,7 @@ table.bw .cchip { max-width: 96px; vertical-align: middle; }
     <div class="seg" role="group" aria-label="Pool list" id="srcSeg">
       <button type="button" data-v="trending" aria-pressed="true">Trending</button>
       <button type="button" data-v="traction" aria-pressed="false">Traction</button>
+      <button type="button" data-v="dlmm" aria-pressed="false">DLMM</button>
       <button type="button" data-v="top" aria-pressed="false">Top volume</button>
       <button type="button" data-v="volume" aria-pressed="false" title="Ranked by volume over the window you pick, from the last minute to the last 24 hours">Volume</button>
       <button type="button" data-v="both" aria-pressed="false" title="Several lists side by side: add, remove and resize panels">Panels</button>
@@ -570,6 +574,16 @@ table.bw .cchip { max-width: 96px; vertical-align: middle; }
       <div class="empty">Click a bubble to open the pool and stream its swaps.</div>
     </section>
 
+    <section id="dlmmSection" hidden>
+      <div class="label" title="The first time this server reads a coin’s DLMM pools, it records the coin’s market cap and how many live pools it had, then follows it. Coins are grouped by that pool count. Settled = recorded over 2 hours ago.">Do more DLMM pools mean better? · the record</div>
+      <table class="bw nums">
+        <thead><tr><th title="Live DLMM pools the coin had when first read">Live pools</th><th title="Coins recorded (settled ones in brackets)">Coins</th><th title="Settled coins whose market cap reached 2× what it was when recorded">Reached 2×</th><th title="Median best market cap since recorded, as a multiple">Best</th><th title="Median market cap now (or when last seen), as a multiple of when recorded">Now</th></tr></thead>
+        <tbody id="dlmmRecordBody"><tr><td colspan="5">Collecting…</td></tr></tbody>
+      </table>
+      <p class="note" id="dlmmRecordNote">Each coin is recorded once, when its DLMM pools are first read, and followed for 14 days.</p>
+      <p class="note">A comparison, not proof: coins with many pools are usually older and bigger, and they entered this record when the server first read them, not when their pools opened. Give it a few hours of data before reading much into it.</p>
+    </section>
+
     <section id="breakoutSection" hidden>
       <div class="label" title="Every coin that makes the Breakout list (Genuine only, any age) is recorded at its market cap that moment and followed for good, even after it drops off. Settled = flagged over 6h ago, so fresh flags don't count as misses." id="bLabel">Breakout record</div>
       <div class="stats">
@@ -618,7 +632,7 @@ table.bw .cchip { max-width: 96px; vertical-align: middle; }
 
 <script>
 // Pool lists ranked by our own stream server (stream/server.js) from swaps it decodes on-chain
-const LISTS = { trending: 'Trending', traction: 'Traction', top: 'Top volume', both: 'Panels', breakout: 'Breakout', volume: 'Volume' };
+const LISTS = { trending: 'Trending', traction: 'Traction', dlmm: 'DLMM', top: 'Top volume', both: 'Panels', breakout: 'Breakout', volume: 'Volume' };
 // the Volume list's windows (stream/lib/market.js VOL_WINDOWS)
 const VOL_WINDOWS = ['1m', '15m', '30m', '1h', '4h', '12h', '24h'];
 const COLOR_RANGE = { m5: 5, h1: 15, h24: 60 };
@@ -703,6 +717,9 @@ function fromStream(r, i) {
     mint: r.mint,
     deployer: r.deployer || null,
     holders: r.holders ?? null,
+    // Meteora DLMM pools (null until read): all of them, those with real liquidity, their liquidity and 24h volume
+    // together, how many opened in the last 24h, and when the newest did
+    dlmmPools: r.dlmmPools ?? null, dlmmLive: r.dlmmLive || 0, dlmmTvl: r.dlmmTvl || 0, dlmmVol24: r.dlmmVol24 || 0, dlmmNew1h: r.dlmmNew1h || 0, dlmmNew24: r.dlmmNew24 || 0, dlmmNewest: r.dlmmNewest || null,
     // top-holder scan (server): biggest single wallet's % of supply, the 10 biggest wallets' together, and how many
     // wallets hold over HOLDER_FLAG (pools, bonding curves and the burn address don't count)
     topHolder: r.topHolderPct ?? null, top10: r.top10Pct ?? null, whales: r.whales || 0,
@@ -811,6 +828,7 @@ function streamConnect() {
       renderAth();
     }
     else if (m.type === 'breakout') renderBreakout(m.stats);
+    else if (m.type === 'dlmmRecord') renderDlmmRecord(m.stats);
     else if (m.type === 'pins') mergePins(m.pins, m.unpinned);
   };
   ws.onclose = () => {
@@ -868,7 +886,8 @@ function pushFeed(ev) {
   feed.unshift(ev);
   const b = document.createElement('button');
   b.type = 'button'; b.className = 'fresh'; b.dataset.pool = ev.pool;
-  const [kc, kt] = { graduate: ['grad', 'GRAD'], drawdown: ['dd', '−80%'], athReset: ['ath', 'ATH'] }[ev.kind] || ['new', 'NEW'];
+  const [kc, kt] = { graduate: ['grad', 'GRAD'], drawdown: ['dd', '−80%'], athReset: ['ath', 'ATH'], dlmm: ['dlmm', 'DLMM'] }[ev.kind] || ['new', 'NEW'];
+  if (ev.kind === 'dlmm') b.title = ev.symbol + ' gained ' + ev.added + ' Meteora DLMM pool' + (ev.added > 1 ? 's' : '') + ': now ' + ev.pools + ', ' + ev.live + ' live';
   if (ev.kind === 'drawdown') b.title = ev.symbol + ' fell 80% from its ' + usd(ev.ath) + ' high (now ' + usd(ev.mcap) + ')';
   else if (ev.kind === 'athReset') b.title = ev.symbol + ' made a new high of ' + usd(ev.ath) + ' after an 80% drawdown: watch reset';
   b.innerHTML = '<span class="t">' + new Date(ev.at).toLocaleTimeString([], { hour12: false }) + '</span>' +
@@ -1490,6 +1509,53 @@ document.addEventListener('click', e => {
   if (e.target.closest('[data-close-trader]')) openTrader(null);
 });
 
+// ---------- Meteora DLMM pools (stream/lib/dlmm.js) ----------
+// How many DLMM pools a coin has, how many hold real liquidity, and the open coin's pools themselves
+const dlmmText = n => n.dlmmPools == null ? '–' : !n.dlmmPools ? 'none' : n.dlmmLive + ' live / ' + n.dlmmPools;
+function dlmmTip(n) {
+  if (n.dlmmPools == null) return 'Meteora DLMM pools not read yet (coins on the list are read in turn)';
+  if (!n.dlmmPools) return 'No Meteora DLMM pools for this coin';
+  return n.dlmmPools + ' Meteora DLMM pool' + (n.dlmmPools > 1 ? 's' : '') + ', ' + n.dlmmLive + ' with $' + DLMM_LIVE + '+ liquidity' +
+    ' · liquidity ' + usd(n.dlmmTvl || 0) + ' · 24h volume ' + usd(n.dlmmVol24 || 0) +
+    (n.dlmmNew24 ? ' · ' + n.dlmmNew24 + ' opened in the last 24h' : '') + (n.dlmmNewest ? ' · newest ' + ago(n.dlmmNewest) + ' ago' : '');
+}
+const DLMM_LIVE = 100; // stream/lib/dlmm.js LIVE_TVL
+let dlmmFor = null;
+async function loadDlmm(n) {
+  const box = $('dlmmBox');
+  if (!box || !n?.mint) return;
+  dlmmFor = n.mint;
+  const { status, body: r } = await getJson('/api/dlmm?mint=' + encodeURIComponent(n.mint));
+  if (dlmmFor !== n.mint || !box.isConnected) return;
+  const head = '<div class="label">Meteora DLMM pools' + (r?.at ? ' · read ' + ago(r.at) + ' ago' : '') + '</div>';
+  if (status === 202) { setH(box, head + '<div class="bsum">Looking up this coin’s DLMM pools…</div>'); return; }
+  if (status !== 200 || !r) { setH(box, head + '<div class="bsum">' + esc(r?.error || 'Couldn’t load the DLMM pools.') + '</div>'); return; }
+  if (!r.pools) { setH(box, head + '<div class="bsum">No DLMM pools for this coin yet.</div>'); return; }
+  setH(box, head +
+    '<div class="bsum"><b>' + r.pools + '</b> pool' + (r.pools > 1 ? 's' : '') + ' · <b class="' + (r.live ? 'up' : '') + '">' + r.live + '</b> live ($' + r.liveTvl + '+)' +
+      ' · liquidity <b>' + usd(r.tvl) + '</b> · 24h volume <b>' + usd(r.vol24) + '</b>' +
+      (r.new24 ? '<br><b class="up">' + r.new24 + ' opened in the last 24h</b>' + (r.newest ? ', newest ' + ago(r.newest) + ' ago' : '') : '') + '</div>' +
+    '<table class="bw nums"><thead><tr><th>Pool</th><th title="Price step between bins, in basis points">Bin</th><th>Liquidity</th><th>Vol 24h</th><th>Age</th></tr></thead><tbody>' +
+    r.list.map(p => '<tr class="' + (p.tvl < r.liveTvl ? 'dim' : '') + '"><td><a href="https://app.meteora.ag/dlmm/' + encodeURIComponent(p.address) + '" target="_blank" rel="noopener" title="' + esc(p.name + (p.baseFeePct != null ? ' · base fee ' + p.baseFeePct + '%' : '') + ' · open on Meteora') + '">' + esc((p.quote ? n.sym + '-' + p.quote : p.name) || short(p.address)) + ' ↗</a></td>' +
+      '<td>' + (p.binStep ?? '–') + '</td><td>' + usd(p.tvl) + '</td><td>' + usd(p.vol24) + '</td><td>' + (p.created ? ago(p.created) : '–') + '</td></tr>').join('') +
+    '</tbody></table>' + (r.pools > r.list.length ? '<div class="bsum">' + (r.pools - r.list.length) + ' more, smaller pools not shown</div>' : ''));
+}
+setInterval(() => { if (state.selected && $('dlmmBox') && !document.hidden) loadDlmm(state.selected); }, 15000);
+
+// the DLMM record (stream/lib/dlmm-record.js): how coins did after their first DLMM read, by live pools then
+function renderDlmmRecord(s) {
+  if (!s) return;
+  const settled = s.groups.filter(g => g.settled >= 5);
+  const best = settled.length > 1 ? settled.reduce((a, b) => (b.hitRate ?? -1) > (a.hitRate ?? -1) ? b : a) : null;
+  setH($('dlmmRecordBody'), s.groups.map(g => '<tr class="' + (best === g && g.hitRate > 0 ? 'best' : '') + '"><td>' + esc(g.bucket) + '</td>' +
+    '<td>' + g.coins.toLocaleString() + (g.settled ? ' <small>(' + g.settled.toLocaleString() + ')</small>' : '') + '</td>' +
+    '<td>' + (g.hitRate == null ? '–' : (g.hitRate * 100).toFixed(g.hitRate < 0.1 ? 1 : 0) + '%') + '</td>' +
+    '<td>' + (g.medianPeakX == null ? '–' : g.medianPeakX.toFixed(2) + '×') + '</td>' +
+    '<td class="' + (g.medianNowX == null ? '' : g.medianNowX >= 1 ? 'up' : 'down') + '">' + (g.medianNowX == null ? '–' : g.medianNowX.toFixed(2) + '×') + '</td></tr>').join(''));
+  setT($('dlmmRecordNote'), s.coins.toLocaleString() + ' coins recorded' + (s.since ? ' since ' + new Date(s.since).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '') +
+    '. Reached 2×, Best and Now count settled coins only (recorded over ' + s.settleHours + 'h ago); groups with under 5 of them say little.');
+}
+
 // ---------- hide coins ----------
 const ICON_HIDE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 2l12 12"/><path d="M6.6 3.6A6.8 6.8 0 0 1 8 3.5c3.6 0 6 4.5 6 4.5a11 11 0 0 1-1.9 2.4M4.2 4.9C2.8 6 2 8 2 8s2.4 4.5 6 4.5c1 0 1.9-.3 2.7-.7"/><path d="M6.6 6.7a2 2 0 0 0 2.8 2.7"/></svg>';
 function hideButtonHtml(n) {
@@ -1766,13 +1832,28 @@ const COLUMNS = {
     } },
   net5: { label: 'Net flow 5m', sort: n => n.net5 ?? -Infinity,
     set: (td, n) => { setT(td, n.net5 != null ? signedUsd(n.net5) : '–'); setC(td, cls(n.net5)); if (!td.title) td.title = 'Bought minus sold over the last 5 minutes'; } },
+  // Meteora DLMM pools: live ones / all of them; green when one opened in the last 24h
+  dlmmNew: { label: 'New DLMM 24h', sort: n => n.dlmmPools == null ? -Infinity : n.dlmmNew24 * 1000 + n.dlmmNew1h,
+    set: (td, n) => {
+      setT(td, n.dlmmPools == null ? '–' : n.dlmmNew24 ? '+' + n.dlmmNew24 : '0'); setC(td, n.dlmmNew1h ? 'up' : '');
+      const t = n.dlmmPools == null ? 'Not read yet' : n.dlmmNew24 + ' DLMM pool' + (n.dlmmNew24 === 1 ? '' : 's') + ' opened in the last 24 hours, ' + n.dlmmNew1h + ' in the last hour' + (n.dlmmNewest ? ' · newest ' + ago(n.dlmmNewest) + ' ago' : '');
+      if (td.title !== t) td.title = t;
+    } },
+  dlmmTvl: { label: 'DLMM liq', sort: n => n.dlmmPools == null ? -Infinity : n.dlmmTvl,
+    set: (td, n) => { setT(td, n.dlmmPools ? usd(n.dlmmTvl) : '–'); if (!td.title) td.title = 'Liquidity in the coin’s Meteora DLMM pools, all together'; } },
+  dlmm: { label: 'DLMM', sort: n => n.dlmmPools == null ? -Infinity : n.dlmmLive * 1000 + n.dlmmPools,
+    set: (td, n) => {
+      setT(td, dlmmText(n)); setC(td, n.dlmmNew24 ? 'up' : '');
+      const t = dlmmTip(n);
+      if (td.title !== t) td.title = t;
+    } },
   coinAge: { label: 'Age', sort: n => n.born ? Date.now() - n.born : -Infinity,
     set: (td, n) => {
       setT(td, n.born ? ago(n.born) : '–');
       if (td._born !== n.born) { td._born = n.born; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; }
     } },
 };
-const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'topHolder', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
+const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'dlmm', 'topHolder', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
 function normalizeColumns(saved) {
   const out = [], seen = new Set();
   for (const c of Array.isArray(saved) ? saved : []) {
@@ -1795,10 +1876,12 @@ state.columns = normalizeColumns(null);
 const BREAKOUT_COLUMNS = ['setup', 'sinceFlag'];
 const VOLUME_COLUMNS = ['volW']; // the window's volume, with its buys and sells
 const TRACTION_COLUMNS = ['trac', 'traders', 'trG', 'net5']; // why the coin is on the Traction list
+const DLMM_COLUMNS = ['dlmm', 'dlmmNew', 'dlmmTvl']; // the DLMM list: its pools, the new ones, and what they hold
 // and "Since pinned" while any coin is pinned
 const shownColumns = pane => {
-  const cols = state.columns.filter(c => c.on).map(c => c.key);
-  const extra = (pane.breakout ? BREAKOUT_COLUMNS : pane.list === 'volume' ? VOLUME_COLUMNS : pane.list === 'traction' ? TRACTION_COLUMNS : []).filter(k => !cols.includes(k));
+  let cols = state.columns.filter(c => c.on).map(c => c.key);
+  if (pane.list === 'dlmm') cols = cols.filter(k => k !== 'dlmm'); // the DLMM list leads with its pool count
+  const extra = (pane.breakout ? BREAKOUT_COLUMNS : pane.list === 'volume' ? VOLUME_COLUMNS : pane.list === 'traction' ? TRACTION_COLUMNS : pane.list === 'dlmm' ? DLMM_COLUMNS : []).filter(k => !cols.includes(k));
   if (pinsShown() && !cols.includes('sincePin') && nodes.some(n => n.pin)) extra.unshift('sincePin');
   cols.splice(cols.indexOf('token') + 1, 0, ...extra);
   return cols;
@@ -1807,7 +1890,7 @@ const shownColumns = pane => {
 // One table per list. In Panels, each panel the viewer added is a table of its own list, ranked by that list (up to
 // MAX_PANELS: the same list twice is fine, e.g. Volume over 1m next to Volume over 4h); otherwise one table shows the
 // whole list. Panels, their sizes and which are collapsed are saved with the other settings.
-const PANEL_LISTS = { trending: 'Trending', traction: 'Traction', top: 'Top volume', breakout: 'Breakout', volume: 'Volume' }, MAX_PANELS = 6;
+const PANEL_LISTS = { trending: 'Trending', traction: 'Traction', dlmm: 'DLMM', top: 'Top volume', breakout: 'Breakout', volume: 'Volume' }, MAX_PANELS = 6;
 const panelLabel = c => PANEL_LISTS[c.list] + (c.list === 'volume' ? ' · ' + c.window : '');
 // How each list is built and ranked (stream/server.js and lib/breakout.js), shown on hover of a panel's ⓘ and of
 // the list tabs
@@ -1822,6 +1905,11 @@ function listInfo(list, win) {
     'Once a coin has been watched for 10 minutes it also needs 25% more traders than an average 5 minutes of the 25 before.\n' +
     'Ranked by a traction score, highest first:\nlog(traders) × √(trader growth, up to 10×) × √(volume growth, up to 10×) × (0.5 + net buying’s share of volume) × (1 + 5m price rise / 100, up to 1.5×).\n' +
     'LaunchLab swaps don’t name the trader on the public feed, so those coins can’t make this list.' + LIST_INFO_ALL;
+  if (list === 'dlmm') return 'DLMM: coins with the most live Meteora DLMM pools.\n' +
+    'Liquidity providers open DLMM pools on coins they expect to keep trading. A pool counts as live when it holds $100 or more.\n' +
+    'Ranked by live pools, most first; ties go to the coin with more pools opened in the last 24 hours, then to the one with more liquidity in them.\n' +
+    'The server reads the pools of coins on your lists every 3 minutes and of the 600 busiest other coins every 15 minutes, so a coin can take a while to appear. ' +
+    'The side panel keeps a record of how coins did after they were first read, by how many live pools they had.' + LIST_INFO_ALL;
   if (list === 'top') return 'Top volume: the most traded coins.\nRanked by 24h volume, highest first (ties by 5m volume).\n' +
     'Counts the swaps this server has seen, up to 24h: since it started, or since Clear volume.' + LIST_INFO_ALL;
   if (list === 'volume') return 'Volume' + (win ? ' over ' + win : '') + ': the most traded coins over a window you pick.\n' +
@@ -1986,7 +2074,7 @@ function setupPanes() {
   applyPaneSizes();
   renderAddPanel(); renderListInfo();
 }
-function panelsChanged() { setupPanes(); streamConfig(); rebuildList(); saveSettings(); }
+function panelsChanged() { setupPanes(); streamConfig(); rebuildList(); saveSettings(); applyListUi(); }
 function addPanel(c) {
   if (state.panels.length >= MAX_PANELS) return;
   state.panels.push(c); state.paneCollapsed.push(false);
@@ -2018,7 +2106,7 @@ function setPanelWindow(i, w) {
   c.window = w; panelsChanged();
 }
 // "+ Add panel" (Panels only): a list, or Volume over a window
-$('panelMenu').innerHTML = ['trending', 'traction', 'top', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
+$('panelMenu').innerHTML = ['trending', 'traction', 'dlmm', 'top', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
   '<div class="grp"><div class="pm-h">Volume over</div><div class="pm-wins">' +
   VOL_WINDOWS.map(w => '<button type="button" data-add="volume" data-win="' + w + '" aria-label="Volume over ' + w + '">' + w + '</button>').join('') + '</div></div>';
 function panelMenu(open) { $('panelMenu').hidden = !open; $('addPanelBtn').setAttribute('aria-expanded', String(open)); }
@@ -2350,7 +2438,7 @@ function restoreSettings() {
   if (s.ageOpen && typeof s.ageOpen === 'object') state.ageOpen = Object.fromEntries(AGE_GROUPS.map(([g]) => [g, s.ageOpen[g] !== false]));
   if (Array.isArray(s.pins)) state.pins = s.pins.map(cleanPin).filter(Boolean).slice(0, 200);
   const okSort = v => v && COLUMNS[v.key] && (v.dir === 1 || v.dir === -1) ? { key: v.key, dir: v.dir } : null;
-  const lists = ['trending', 'top', 'breakout', 'volume', 'traction'];
+  const lists = ['trending', 'top', 'breakout', 'volume', 'traction', 'dlmm'];
   if (s.sorts && typeof s.sorts === 'object') for (const l of lists) { const v = okSort(s.sorts[l]); if (v) state.sorts[l] = v; }
   else if (okSort(s.sort)) for (const l of lists) state.sorts[l] = okSort(s.sort); // one sort for every list, saved before sorts were per list
   state.columns = normalizeColumns(s.columns);
@@ -2527,6 +2615,7 @@ function renderPool(refreshOnly) {
     '<dt>Market cap</dt><dd id="pvMcap">' + usdFine(n.mcap || NaN) + '</dd>' +
     '<dt>ATH</dt><dd data-f="ath">' + athText(n) + '</dd>' +
     '<dt>Holders</dt><dd data-f="holders">' + (n.holders != null ? n.holders.toLocaleString() : '–') + '</dd>' +
+    '<dt>DLMM pools</dt><dd data-f="dlmm" class="' + (n.dlmmNew24 ? 'up' : '') + '" title="' + esc(dlmmTip(n)) + '">' + dlmmText(n) + '</dd>' +
     '<dt>24h volume</dt><dd data-f="vol24">' + usd(n.vol24) + '</dd>' +
     '<dt>1h volume</dt><dd data-f="vol1">' + usd(n.vol1) + '</dd>' +
     '<dt>5m volume</dt><dd data-f="vol5">' + usd(n.vol5) + '</dd>' +
@@ -2539,6 +2628,7 @@ function renderPool(refreshOnly) {
     '<div class="ratio-labels"><span class="up" data-f="buys">5m buys ' + n.buys5 + '</span><span class="down" data-f="sells">sells ' + n.sells5 + '</span></div></div>' +
     (n.bundle || n.program === 'pump' || /pump$/.test(n.mint || '') ? '<div class="bundle-box" id="bundleBox"><div class="label">Launch bundle</div><div class="bsum">Loading…</div></div>' : '') +
     (n.mint ? '<div class="bundle-box" id="holdersBox"><div class="label">Top holders</div><div class="bsum">Loading\u2026</div></div>' : '') +
+    (n.mint ? '<div class="bundle-box" id="dlmmBox"><div class="label">Meteora DLMM pools</div><div class="bsum">Loading…</div></div>' : '') +
     '<div class="bundle-box" id="tradersBox"><div class="label">Traders</div><div class="bsum">Loading…</div></div>' +
     '<div class="links">' +
       (n.program === 'pump' ? '<a href="https://pump.fun/coin/' + encodeURIComponent(n.addr) + '" target="_blank" rel="noopener">Pump.fun ↗</a>' : '') +
@@ -2549,6 +2639,7 @@ function renderPool(refreshOnly) {
   $('closePool').addEventListener('click', () => select(null));
   if ($('bundleBox')) loadBundle(n);
   if ($('holdersBox')) loadHolders(n);
+  if ($('dlmmBox')) loadDlmm(n);
   loadPoolTraders(n);
   if (tradeFor === n.addr) renderTape(refreshOnly);
 }
@@ -2568,6 +2659,7 @@ function refreshPool(n) {
   const put = (k, t) => { const e = f(k); if (e) setT(e, t); };
   put('vol24', usd(n.vol24)); put('vol1', usd(n.vol1)); put('vol5', usd(n.vol5));
   put('holders', n.holders != null ? n.holders.toLocaleString() : '–');
+  { const e = f('dlmm'); if (e) { setT(e, dlmmText(n)); setC(e, n.dlmmNew24 ? 'up' : ''); const t = dlmmTip(n); if (e.title !== t) e.title = t; } }
   if (n.whales) put('whaleText', whaleText(n) + '.');
   put('ath', athText(n)); { const e = f('ath'); if (e) setC(e, n.ddAt || (n.ath && athDrop(n.mcap, n.ath) <= -80) ? 'down' : ''); }
   put('traders5', String(n.traders5)); if (n.score != null) put('score', n.score.toFixed(1));
@@ -2704,6 +2796,7 @@ function applyListUi() {
   $('volWindowCtl').hidden = state.list !== 'volume';
   renderAddPanel();
   $('breakoutSection').hidden = state.list !== 'breakout' && state.list !== 'both';
+  $('dlmmSection').hidden = state.list !== 'dlmm' && !(state.list === 'both' && state.panels.some(p => p.list === 'dlmm'));
   renderLegend();
 }
 segment('srcSeg', v => {

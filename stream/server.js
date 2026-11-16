@@ -12,7 +12,7 @@
 //      BUNDLE_DETECT=0 to turn off this server's own launch-bundle detector (Jito + block-order fallback),
 //      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start,
 //      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz,
-//      HOLDERS=0 to skip the top-holder scan (lib/holders.js),
+//      HOLDERS=0 to skip the top-holder scan (lib/holders.js), DLMM=0 to skip counting Meteora DLMM pools (lib/dlmm.js),
 //      TRADERS=0 to skip following wallets (lib/traders.js), TRADER_WINDOW_MIN (60) for how far back it looks,
 //      WS_ROTATE_MS (12000; 0 = off) for how often the public websocket is replaced before it gets cut
 import http from 'node:http';
@@ -35,6 +35,8 @@ import { createAthWatch } from './lib/ath.js';
 import { rankBreakout, createBreakoutTracker } from './lib/breakout.js';
 import { createPins } from './lib/pins.js';
 import { createHolderScan } from './lib/holders.js';
+import { createDlmm, rankDlmm } from './lib/dlmm.js';
+import { createDlmmRecord } from './lib/dlmm-record.js';
 import { rankTraction } from './lib/traction.js';
 import { createTraders } from './lib/traders.js';
 
@@ -151,6 +153,23 @@ let pinRows = []; // one row per pin, rebuilt each tick and added to the Breakou
 // top holders of the coins people are looking at, and any single wallet holding over 3.5% of supply. On the public
 // RPC (one coin at a time), so the Helius budget stays for live account lookups
 const holders = process.env.HOLDERS !== '0' ? createHolderScan({ rpc: publicRpc, log }) : null;
+// Meteora DLMM pools of the coins people are looking at: how many, how many live, their liquidity (Meteora's API)
+// A coin's most liquid listed row (its market cap and where to open it), for what the DLMM reader reports
+const bestRow = mint => latestRows.reduce((b, r) => r.mint === mint && (!b || r.liq > b.liq) ? r : b, null);
+// the record behind "do coins with more DLMM pools do better?": each coin's market cap at its first DLMM read,
+// grouped by how many live pools it had, and how it did afterwards (lib/dlmm-record.js). Kept in its own file.
+const dlmmRecord = process.env.DLMM !== '0' ? createDlmmRecord({ file: path.join(DATA_DIR, 'dlmm-record.json'), log }) : null;
+const dlmm = process.env.DLMM !== '0' ? createDlmm({
+  log,
+  onRead: (mint, s, first) => { if (first) dlmmRecord.note(bestRow(mint), s); },
+  // a coin gained DLMM pools since its last read: tell the dashboards (the launches feed shows it)
+  onNew: ev => {
+    const r = bestRow(ev.mint);
+    if (!r) return;
+    broadcast({ type: 'event', kind: 'dlmm', pool: r.id, venue: r.venue, symbol: r.sym,
+      name: '+' + ev.added + ' DLMM pool' + (ev.added > 1 ? 's' : '') + ' · ' + ev.live + ' live of ' + ev.pools, added: ev.added, pools: ev.pools, live: ev.live, at: Date.now() });
+  },
+}) : null;
 // who is trading what over the last hour: the Traders view, an open coin's traders and what else they trade
 const traders = process.env.TRADERS !== '0' ? createTraders({ windowMs: (+process.env.TRADER_WINDOW_MIN || 60) * 60e3 }) : null;
 
@@ -163,16 +182,19 @@ if (snap) {
   athWatch.restore(snap.ath);
   breakout.restore(snap.breakout); // snapshots from before the record had its own file
   meta.restore(snap.meta);
+  dlmm?.restore(snap.dlmm);
   for (const p of market.pools.values()) if (!meta.get(p.mint)?.icon) meta.request(p.mint);
   log(`snapshot from ${Math.round((Date.now() - snap.at) / 1000)}s ago restored: ${pools} pools, ${launches} launches being followed`);
 }
 function saveSnapshot() {
   pins.save();
   breakout.save();
+  dlmmRecord?.save();
   if (!snapshot) return;
   const mints = [];
   for (const p of market.pools.values()) if (p.ready) mints.push(p.mint, p.quoteMint);
-  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump(), volClearedAt: market.volClearedAt || null });
+  snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump(), volClearedAt: market.volClearedAt || null,
+    dlmm: dlmm?.dump(mints) || null });
 }
 setInterval(saveSnapshot, 60e3).unref();
 // Ctrl+C, a closed terminal window, or a kill: save, then exit (the wallet DB, funding cache and Helius usage
@@ -314,8 +336,9 @@ function trendScore(r, now) {
 // Breakout coins also carry their setup score as `setup`, and why; Volume coins their volume per window as `vols`.
 // "breakout" ranks setups by lib/breakout.js's score, and only coins passing its safety gates
 // "traction" ranks coins gaining traders (lib/traction.js): the last 5 minutes against the 25 before; its score is `trac`
-const LISTS = ['trending', 'top', 'both', 'breakout', 'volume', 'traction'];
-const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume', 'traction'], MAX_PANELS = 6;
+// "dlmm" ranks coins by how many live Meteora DLMM pools they have (lib/dlmm.js)
+const LISTS = ['trending', 'top', 'both', 'breakout', 'volume', 'traction', 'dlmm'];
+const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume', 'traction', 'dlmm'], MAX_PANELS = 6;
 const DEFAULT_PANELS = [{ list: 'trending' }, { list: 'top' }, { list: 'breakout' }];
 // panels as the dashboard sends them ([{ list, window }]) or as a query string ("trending,top,volume:15m")
 function readPanels(v) {
@@ -349,12 +372,13 @@ function pick(rows, cfg) {
   if (cfg.list === 'volume') return rankVolume(eligible, cfg.limit, cfg.window, now);
   if (cfg.list === 'trending') return rankTrending(eligible, cfg.limit, now);
   if (cfg.list === 'traction') return rankTraction(eligible, cfg.limit);
+  if (cfg.list === 'dlmm') return rankDlmm(eligible, cfg.limit);
   // Panels: each panel's list (the same list twice, e.g. two Volume panels with one window, is ranked once)
   const ranked = new Map(), out = new Map(), n = cfg.panels.length;
   const rank = p => {
     const k = p.list + ':' + (p.window || '');
     if (!ranked.has(k)) ranked.set(k, p.list === 'top' ? rankTop(eligible, cfg.limit) : p.list === 'breakout' ? rankBreakout(eligible, cfg.limit, now) :
-      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : p.list === 'traction' ? rankTraction(eligible, cfg.limit) : rankTrending(eligible, cfg.limit, now));
+      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : p.list === 'traction' ? rankTraction(eligible, cfg.limit) : p.list === 'dlmm' ? rankDlmm(eligible, cfg.limit) : rankTrending(eligible, cfg.limit, now));
     return ranked.get(k);
   };
   cfg.panels.forEach((p, i) => rank(p).forEach((r, j) => {
@@ -403,7 +427,7 @@ function stats() {
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
-    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
+    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
@@ -487,7 +511,8 @@ const STATIC = ['program', 'venue', 'mint', 'sym', 'name', 'icon', 'quote', 'bor
 const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sells5', 'traders5', 'chg5', 'chg60', 'chg24',
   'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'bs', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
-  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW', 'trG', 'volG', 'net5', 'trac'];
+  'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW', 'trG', 'volG', 'net5', 'trac',
+  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -574,6 +599,17 @@ setInterval(() => {
   const p = JSON.stringify({ type: 'pins', pins: pins.saved(), unpinned: pins.unpinned() });
   if (p !== pinsSent) { pinsSent = p; for (const c of clients) sendTo(c, 'pins', p); }
 }, 2000);
+// the DLMM record: followed every 2s, summarised every 20s (it can hold tens of thousands of coins)
+let dlmmRecordMsg = dlmmRecord ? JSON.stringify({ type: 'dlmmRecord', stats: dlmmRecord.stats() }) : null;
+if (dlmmRecord) {
+  setInterval(() => dlmmRecord.update(latestRows), 2000);
+  setInterval(() => {
+    const s = JSON.stringify({ type: 'dlmmRecord', stats: dlmmRecord.stats() });
+    if (s === dlmmRecordMsg) return;
+    dlmmRecordMsg = s;
+    for (const c of clients) sendTo(c, 'dlmmRecord', s);
+  }, 20000);
+}
 setInterval(() => {
   const t0 = performance.now();
   latestRows = market.rows();
@@ -591,6 +627,8 @@ setInterval(() => {
     if (b && r.id === b.pool) { r.flagMcap = b.entry; r.flagAt = b.flaggedAt; r.peakX = b.peak / b.entry; r.hitAt = b.hitAt; }
     const h = holders?.row(r.mint);
     if (h) Object.assign(r, h);
+    const d = dlmm?.row(r.mint);
+    if (d) Object.assign(r, d);
   }
   for (const c of clients) pushPools(c, false);
   sample(perf.tickMs, performance.now() - t0);
@@ -623,6 +661,12 @@ function refreshBundlePriority() {
   const open = [];
   for (const c of clients) { const r = c.selected && rows.get(c.selected); if (r) open.push(r.mint); }
   holders?.want(open, ordered.map(r => r.mint));
+  if (dlmm) {
+    // beyond what the lists show: the busiest genuine coins with real liquidity, so the DLMM list can find them
+    const shown = new Set(ordered.map(r => r.mint));
+    const more = latestRows.filter(r => r.genuine && r.liq >= 2000 && !shown.has(r.mint)).sort((a, b) => b.vol60 - a.vol60).slice(0, 600).map(r => r.mint);
+    dlmm.want(open, ordered.map(r => r.mint), more);
+  }
   backfill?.want([...new Set(ordered.filter(r => r.program === 'pump' || (r.program === 'pumpswap' && r.mint.endsWith('pump'))).map(r => r.mint))]);
 }
 // server stats change slowly and are bulky: their own message every 2s
@@ -698,6 +742,11 @@ const server = http.createServer(async (req, res) => {
     const mint = url.searchParams.get('mint') || '', report = launchBundles.report(mint), pending = !report && backfill?.status(mint);
     res.writeHead(report ? 200 : pending ? 202 : 404, { 'content-type': 'application/json' })
       .end(JSON.stringify(report || (pending ? { backfill: pending } : { error: 'launch not seen by this server' })));
+  } else if (url.pathname === '/api/dlmm') {
+    // a coin's Meteora DLMM pools, most liquid first (202 while its first read is waiting: open coins are read first)
+    const mint = url.searchParams.get('mint') || '', report = dlmm?.report(mint);
+    res.writeHead(report ? 200 : dlmm ? 202 : 404, { 'content-type': 'application/json' })
+      .end(JSON.stringify(report || (dlmm ? { pending: true } : { error: 'DLMM pool counting is off (DLMM=0)' })));
   } else if (url.pathname === '/api/holders') {
     // a coin's 20 biggest holders by owner, which are wallets, and whether any one holds over 3.5% of supply
     // (202 while its first scan is waiting: open or listed coins are scanned first)
@@ -715,6 +764,11 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/ath') {
     // the ATH watch: coins that reached the top 10 of Top volume, their high, and any 80% drawdown since
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), coins: athWatch.list() }));
+  } else if (url.pathname === '/api/dlmm-record') {
+    // how coins did after their first DLMM read, grouped by the live pools they had then; and the coins, newest first
+    if (!dlmmRecord) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'DLMM pool counting is off (DLMM=0)' })); return; }
+    const limit = Math.max(0, Math.min(100_000, +(url.searchParams.get('limit') ?? 500)));
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), stats: dlmmRecord.stats(), coins: dlmmRecord.dump().sort((a, b) => b.at - a.at).slice(0, limit) }));
   } else if (url.pathname === '/api/breakout') {
     // the Breakout list's record: every coin it has flagged (newest first), its market cap then, peak since, and the hit rate
     const limit = Math.max(1, Math.min(100_000, +url.searchParams.get('limit') || 1000));
@@ -790,6 +844,7 @@ wss.on('connection', ws => {
   if (athNews) for (const o of clients) if (o !== c) sendTo(o, 'ath', athNews);
   sendTo(c, 'ath', athFull());
   send({ type: 'breakout', stats: breakout.stats() });
+  if (dlmmRecordMsg) sendTo(c, 'dlmmRecord', dlmmRecordMsg);
   send({ type: 'pins', pins: pins.saved(), unpinned: pins.unpinned() });
   pushPools(c, true);
   ws.on('message', raw => {

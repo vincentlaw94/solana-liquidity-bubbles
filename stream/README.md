@@ -108,6 +108,7 @@ venue goes quiet, re-check its event layout first.
 | `SNAPSHOT` | on | `0` starts empty every time instead of restoring the last run (see Snapshot) |
 | `HOLDERS` | on | `0` turns off the top-holder scan (see Top holders) |
 | `TRADERS` | on | `0` stops following wallets (see Traders) |
+| `DLMM` | on | `0` stops counting each coin's Meteora DLMM pools (see Meteora DLMM pools) |
 | `TRADER_WINDOW_MIN` | `60` | How many minutes of swaps the Traders view and an open coin's traders cover |
 | `WS_ROTATE_MS` | `12000` | How often the websocket feed is replaced before the RPC cuts it (see Staying connected); `0` turns it off |
 
@@ -126,7 +127,7 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
-- `GET /api/pools?list=trending|traction|top|both|breakout|volume&limit=100&minLiq=0&genuine=true&maxAge=0&window=1h`: a ranked pool list
+- `GET /api/pools?list=trending|traction|dlmm|top|both|breakout|volume&limit=100&minLiq=0&genuine=true&maxAge=0&window=1h`: a ranked pool list
   (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity
   - `traction`: coins gaining traders, by traction score (see Traction list); rows carry it as `trac`
@@ -158,6 +159,11 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/trader?wallet=<address>`: one wallet's totals and every coin it traded in the window (`coinList`); 404 if it made no swaps
 - `GET /api/pool-traders?id=<pool id>`: a pool's traders in the window: how many, how many bought or sold more, its 12
   biggest (`top`), and the other coins its traders are in (`also`: coins shared by 2+ of its non-bot wallets, most wallets first)
+- `GET /api/dlmm?mint=<mint>`: a coin's Meteora DLMM pools (see Meteora DLMM pools): `pools`, `live`, `tvl`, `vol24`,
+  `new24`, `newest`, and `list` (its 25 most liquid pools, each with `address`, `tvl`, `vol24`, `binStep`, `created`). 202
+  while its first read is waiting
+- `GET /api/dlmm-record?limit=500`: the DLMM record: `stats.groups` (per live-pool group: `coins`, `settled`, `hits`,
+  `hitRate`, `medianPeakX`, `medianNowX`) and the recorded coins, newest first
 - `GET /api/ath`: the ATH watch (see below): every coin that reached the Top volume top 10, its current top-10 coins first
 - `GET /api/breakout?limit=1000`: the Breakout list's record: `stats` (flagged, hits, settled, hitRate, medianPeakX, `since`,
   and the same for the last day under `day`) and the coins it flagged, newest first, with their market cap then (`entry`), `peak` and `hitAt`
@@ -412,6 +418,34 @@ Wallets that trade like bots are tagged (over 150 swaps in the hour, or 30+ swap
 position), left out of the Traders view unless you tick Show bots, and never counted toward "also in". The hour is
 kept as six 10-minute slices, so totals cover between 50 and 60 minutes; they start empty on every start (wallets
 aren't saved in the snapshot). Up to 250,000 wallets are followed at once.
+
+## Meteora DLMM pools
+
+For every coin on someone's list, the server counts its Meteora DLMM pools (`lib/dlmm.js`). Liquidity providers
+open DLMM pools on coins they expect to keep trading, so a coin gaining them is drawing LP attention. Pools come
+from Meteora's DLMM data API (`dlmm.datapi.meteora.ag/pools?query=<mint>`); search hits that don't hold the coin
+are ignored. Coins someone has open are re-read every 30s, listed coins every 3 minutes, and the 600 busiest genuine
+coins no list is showing (with $2K+ liquidity) every 15 minutes, one coin at a time at about 3 requests a second (the
+API allows about 300 per 10s), pausing 30s after a 429. A failed read keeps the last good one and is retried a minute
+later. Counts are saved in the snapshot, so they show straight after a restart.
+
+Every row carries `dlmmPools` (all its DLMM pools; null until read), `dlmmLive` (those holding $100 or more),
+`dlmmTvl` and `dlmmVol24` (their liquidity and 24h volume together), `dlmmNew1h` and `dlmmNew24` (pools opened in the
+last hour and 24 hours) and `dlmmNewest`. The dashboard's DLMM column shows live / all, green when a pool opened in the last 24 hours, and the
+open coin lists its pools with links to Meteora. These pools are counted, not tracked: their swaps don't feed the
+lists' volumes or prices.
+
+- **DLMM list** (`list=dlmm`, also a panel): coins with at least one live DLMM pool, the most live pools first; ties
+  go to the coin with more pools opened in the last 24 hours, then to the one with more liquidity in them.
+- **New-pool alerts**: when a read finds more pools than the one before, an `event` of kind `dlmm` goes to the
+  dashboards (the launches feed shows "+1 DLMM pool · 5 live of 7"). Pools opened while the server was off raise none.
+- **The record** (`lib/dlmm-record.js`, `GET /api/dlmm-record`, kept in `data/dlmm-record.json`): does having more
+  DLMM pools go with doing better? The first time a coin's pools are read, its market cap and live pool count are
+  recorded; from then on its peak, whether it reached 2×, and its market cap now are followed for 14 days. Coins are
+  grouped by live pools at that first read (0, 1, 2-3, 4-7, 8+) and each group reports its coins, the share of
+  settled ones (recorded over 2 hours ago) that reached 2×, and the median best and current multiples. It is a
+  comparison of outcomes, not proof of cause: coins with many pools are usually older and bigger survivors, and a
+  coin enters the record when this server first reads it, not when its pools opened.
 
 ## ATH watch
 

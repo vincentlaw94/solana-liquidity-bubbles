@@ -3,7 +3,7 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): Trending, Traction, Top volume, Breakout, Volume, or Panels (lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list, up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
+- **List view** (default): Trending, Traction, DLMM, Top volume, Breakout, Volume, or Panels (lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list, up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.
@@ -13,6 +13,11 @@ chain logs. There's no third-party market-data API in between.
 - **Traders view**: the most active wallets of the last hour and the coins each is trading. Click a wallet (there, in
   an open coin's traders, or in its live swaps) for everything it traded; an open coin shows its biggest traders and
   which other coins the same wallets are in.
+- **Meteora DLMM pools**: a DLMM column shows how many Meteora DLMM pools each coin has (live ones / all of them),
+  green when one opened in the last 24 hours. The open coin lists its pools with their liquidity, volume and a link to Meteora.
+  A **DLMM list** ranks coins by live pools, the launches feed flags a coin the moment it gains a pool, and a record in
+  the side panel compares how coins did afterwards by how many pools they had, so you can see whether more pools
+  really goes with better results.
 - **Coverage**: Pump.fun (bonding curve and coins graduated to the Pump AMM), Raydium LaunchLab
   (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags, Moonshot and others).
 - **Genuine only filter**: hides rug pulls, wash trading, self-trading, active mint/freeze authority,
