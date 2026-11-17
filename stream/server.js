@@ -12,6 +12,7 @@
 //      BUNDLE_DETECT=0 to turn off this server's own launch-bundle detector (Jito + block-order fallback),
 //      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start,
 //      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz,
+//      STONKFUN=0 to skip reading Stonk.fun's coin list (lib/stonkfun.js: labels, and its Raydium CLMM pools),
 //      HOLDERS=0 to skip the top-holder scan (lib/holders.js), DLMM=0 to skip counting Meteora DLMM pools (lib/dlmm.js),
 //      TRADERS=0 to skip following wallets (lib/traders.js), TRADER_WINDOW_MIN (60) for how far back it looks,
 //      WS_ROTATE_MS (12000; 0 = off) for how often the public websocket is replaced before it gets cut
@@ -21,7 +22,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { PROGRAMS, eventsFromLogs, decodeLogEvent, decodeDbcTx, decodeDbcEvent, token2022Metadata, metaplexMetadataAddress, metaplexMetadata } from './lib/decode.js';
+import { PROGRAMS, CLMM, eventsFromLogs, decodeLogEvent, isCutShortTrade, decodeInnerEvents, decodeDbcTx, decodeDbcEvent, token2022Metadata, metaplexMetadataAddress, metaplexMetadata } from './lib/decode.js';
 import { createLaserStream, probeLaserStream } from './lib/laserstream.js';
 import { loadBundlerWallets, syncBundlerWallets } from './lib/bundlers.js';
 import { createJito, createBundleDetector } from './lib/bundles.js';
@@ -36,6 +37,7 @@ import { rankBreakout, createBreakoutTracker } from './lib/breakout.js';
 import { createPins } from './lib/pins.js';
 import { createHolderScan } from './lib/holders.js';
 import { createDlmm, rankDlmm } from './lib/dlmm.js';
+import { createStonkfun } from './lib/stonkfun.js';
 import { createDlmmRecord } from './lib/dlmm-record.js';
 import { rankTraction } from './lib/traction.js';
 import { createTraders } from './lib/traders.js';
@@ -183,6 +185,7 @@ if (snap) {
   breakout.restore(snap.breakout); // snapshots from before the record had its own file
   meta.restore(snap.meta);
   dlmm?.restore(snap.dlmm);
+  market.launchRestore(snap.launchMints); // which coins came from a launchpad: their Raydium pools are listed at once
   for (const p of market.pools.values()) if (!meta.get(p.mint)?.icon) meta.request(p.mint);
   log(`snapshot from ${Math.round((Date.now() - snap.at) / 1000)}s ago restored: ${pools} pools, ${launches} launches being followed`);
 }
@@ -194,7 +197,7 @@ function saveSnapshot() {
   const mints = [];
   for (const p of market.pools.values()) if (p.ready) mints.push(p.mint, p.quoteMint);
   snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump(), volClearedAt: market.volClearedAt || null,
-    dlmm: dlmm?.dump(mints) || null });
+    dlmm: dlmm?.dump(mints) || null, launchMints: market.launchDump() });
 }
 setInterval(saveSnapshot, 60e3).unref();
 // Ctrl+C, a closed terminal window, or a kill: save, then exit (the wallet DB, funding cache and Helius usage
@@ -212,7 +215,8 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 
 // ---- ingest ----
 const started = Date.now();
-const counters = { notifications: {}, failedTx: {}, decoded: {}, dbcQueued: 0, dbcDropped: 0, dbcFetched: 0, dbcMissing: 0 };
+const counters = { notifications: {}, failedTx: {}, decoded: {}, dbcQueued: 0, dbcDropped: 0, dbcFetched: 0, dbcMissing: 0,
+  shortQueued: 0, shortFetched: 0, shortDropped: 0, shortMissing: 0 };
 const rate = { last: { ...counters.decoded }, perSec: {}, at: Date.now() };
 const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
 const dbcQueue = [];
@@ -226,12 +230,26 @@ const emitEvent = (ev, sig, slot, signer) => {
 };
 // Decode launchpad events from a transaction's logs. `only` limits it to one program (websocket mode,
 // where the same transaction can arrive on several program subscriptions).
-function ingestLogs(logs, sig, slot, signer, only) {
+// Returns the pools of the LaunchLab trades it decoded, and how many LaunchLab trades were logged cut short.
+// `onlyPools`: keep only events of these pools (a routed swap can pass through pools nobody subscribed to).
+function ingestLogs(logs, sig, slot, signer, only, onlyPools = null) {
+  let short = 0;
+  const pools = new Set();
   for (const e of eventsFromLogs(logs)) {
     if (only ? e.program !== only : !OUR_PROGRAMS.has(e.program)) continue;
     const ev = decodeLogEvent(e.program, e.data);
-    if (ev) emitEvent(ev, sig, slot, signer);
+    if (ev && onlyPools && !onlyPools.has(ev.pool)) continue;
+    if (ev) { emitEvent(ev, sig, slot, signer); if (ev.program === 'launchlab') pools.add(ev.pool); }
+    else if (isCutShortTrade(e.program, e.data)) short++;
   }
+  return { short, pools };
+}
+// LaunchLab trades whose logged event was cut short (lib/decode.js isCutShortTrade): rare, so each such
+// transaction is fetched whole and the full event read from it (websocket mode; LaserStream carries it inline)
+const shortQueue = [];
+function queueShort(sig) {
+  shortQueue.push({ sig, at: Date.now() }); counters.shortQueued++;
+  if (shortQueue.length > 200) { shortQueue.shift(); counters.shortDropped++; }
 }
 
 // ---- live feed: LaserStream when the key has access, otherwise the public websocket ----
@@ -244,8 +262,14 @@ function startLaser() {
       onAccessDenied: why => useWebsocket('LaserStream access ended: ' + why),
       onTx(tx) {
         bump(counters.notifications, 'laserstream');
-        ingestLogs(tx.logs, tx.sig, tx.slot, tx.signer);
+        const got = ingestLogs(tx.logs, tx.sig, tx.slot, tx.signer);
         for (const e of tx.cpiEvents) {
+          if (e.program === PROGRAMS.launchlab && got.short) {
+            // a LaunchLab trade logged cut short: its full event is right here (one its logs already gave is skipped)
+            const ev = decodeLogEvent(PROGRAMS.launchlab, e.data);
+            if (ev?.kind === 'trade' && !got.pools.has(ev.pool)) emitEvent(ev, tx.sig, tx.slot, tx.signer);
+            continue;
+          }
           if (e.program !== PROGRAMS.dbc) continue;
           const ev = decodeDbcEvent(e.data, tx.signer);
           if (ev) emitEvent(ev, tx.sig, tx.slot, tx.signer);
@@ -270,7 +294,7 @@ function startWebsocket() {
           }
           return;
         }
-        ingestLogs(logs, sig, slot, null, PROGRAMS[name]);
+        if (ingestLogs(logs, sig, slot, null, PROGRAMS[name]).short) queueShort(sig);
       },
     });
 }
@@ -294,6 +318,41 @@ async function checkLaser() {
   if (r.ok) useLaser();
   else useWebsocket('LaserStream not available for this key: ' + (r.code ? r.code + ', ' : '') + r.details);
 }
+// ---- Stonk.fun (lib/stonkfun.js) and the Raydium CLMM pools of its direct launches ----
+// Its coins are labelled Stonk.fun, and the CLMM pools of its busiest Raydium launches are subscribed to one by one
+// on their own websocket (whatever feed carries the rest: the program as a whole is too busy for the public RPC).
+const clmmFeed = { stream: null, key: '', pools: 0, set: new Set() };
+function followClmm(pools) {
+  const key = [...pools].sort().join();
+  if (key === clmmFeed.key) return;
+  clmmFeed.key = key; clmmFeed.pools = pools.length; clmmFeed.set = new Set(pools);
+  clmmFeed.stream?.close();
+  clmmFeed.stream = pools.length ? createLogStream({
+    url: RPC_WS, programs: pools.map(a => ['clmm', a]),
+    rotateMs: process.env.WS_ROTATE_MS != null ? +process.env.WS_ROTATE_MS : 12000,
+    onStatus: s => { if (!/^connected$/.test(s)) log('CLMM feed ' + s); },
+    onLogs(name, sig, logs, err, slot) {
+      bump(counters.notifications, 'clmm');
+      if (err) { bump(counters.failedTx, 'clmm'); return; }
+      ingestLogs(logs, sig, slot, null, CLMM, clmmFeed.set);
+    },
+  }) : null;
+  log('CLMM feed: following ' + pools.length + ' Stonk.fun Raydium pool' + (pools.length === 1 ? '' : 's'));
+}
+const stonkfun = process.env.STONKFUN !== '0' ? createStonkfun({
+  log,
+  onUpdate(s) {
+    for (const c of s.coins()) {
+      market.noteLaunch(c.mint, 'Stonk.fun');
+      // names and logos for coins the chain hasn't named yet (the chain's own name wins)
+      const m = meta.get(c.mint);
+      if (!m?.symbol && c.sym) meta.set(c.mint, { symbol: c.sym, name: m?.name || c.name });
+      if (!m?.icon && c.image) meta.set(c.mint, { icon: c.image });
+    }
+    followClmm(s.clmmPools());
+  },
+}) : null;
+
 if (LASER_KEY) {
   useWebsocket('checking LaserStream access'); // data flows while the check runs
   checkLaser();
@@ -318,6 +377,21 @@ setInterval(async () => {
     for (const ev of decodeDbcTx(tx)) emitEvent(ev, sig, tx.slot, ev.user);
   } catch {}
 }, 1000 / DBC_TX_PER_SEC);
+
+setInterval(async () => {
+  if (feed.type !== 'rpc-websocket' || !shortQueue.length) return;
+  if (rpc.busy('getTransaction') > 1000) return;
+  const i = shortQueue.findIndex(q => Date.now() - q.at >= DBC_CONFIRM_MS);
+  if (i < 0) return;
+  const { sig, at } = shortQueue.splice(i, 1)[0];
+  try {
+    const tx = await rpc('getTransaction', [sig, { maxSupportedTransactionVersion: 1, encoding: 'json', commitment: 'confirmed' }]);
+    if (!tx) { if (Date.now() - at < 20000) shortQueue.push({ sig, at: at + 1000 }); else counters.shortMissing++; return; }
+    if (tx.meta?.err) return;
+    counters.shortFetched++;
+    for (const ev of decodeInnerEvents(tx, PROGRAMS.launchlab)) if (ev.kind === 'trade') emitEvent(ev, sig, tx.slot, ev.user);
+  } catch {}
+}, 1000);
 
 // ---- fan-out ----
 // Momentum score for "Trending": recent volume, how far the last 5 minutes beat the pool's own
@@ -427,10 +501,14 @@ function stats() {
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
     bundlerWallets: bundlers.state,
-    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
+    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm?.stats() || null,
+    raydium: { launchMints: market.launchMints.size, cpmmIgnored: market.counts.cpmmIgnored, clmmPools: clmmFeed.pools, clmmConnected: clmmFeed.stream?.connected ?? null },
+    stonkfun: stonkfun?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
+    // LaunchLab trades logged cut short, fetched whole
+    launchlabShort: { queued: counters.shortQueued, fetched: counters.shortFetched, dropped: counters.shortDropped, missing: counters.shortMissing, waiting: shortQueue.length },
     rpc: rpc.stats, rpcUrl: RPC_HTTP.replace(/api-key=[^&]+/, 'api-key=***'),
     latency: {
       // decoded on this server -> handed to every client socket (ms)

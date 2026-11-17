@@ -172,7 +172,9 @@ export function createAccountLoader(rpc) {
 export function createLogStream({ url, programs, onLogs, onStatus, rotateMs = 12000, overlapMs = 250, WebSocketImpl = globalThis.WebSocket }) {
   let active = null, standby = null, lastMsg = 0, attempts = 0, stopped = false, retryTimer = null, rotateTimer = null;
   const state = { connected: false, reconnects: 0, rotations: 0, duplicates: 0, since: 0 };
-  const names = Object.keys(programs);
+  // { name: address }, or [[name, address], ...] when several addresses share a name (individual pools of one
+  // program: a notification about one transaction is then passed on once, whichever of them it came on)
+  const subs = Array.isArray(programs) ? programs : Object.entries(programs);
   // notifications already passed on (two generations, swapped every 30s)
   let seen = new Set(), seenOld = new Set();
   const seenTimer = setInterval(() => { seenOld = seen; seen = new Set(); }, 30000).unref();
@@ -186,9 +188,9 @@ export function createLogStream({ url, programs, onLogs, onStatus, rotateMs = 12
     c.ws.onopen = () => {
       lastMsg = Date.now();
       let id = 1;
-      for (const name of names) {
+      for (const [name, address] of subs) {
         c.reqNames.set(id, name);
-        c.ws.send(JSON.stringify({ jsonrpc: '2.0', id: id++, method: 'logsSubscribe', params: [{ mentions: [programs[name]] }, { commitment: 'processed' }] }));
+        c.ws.send(JSON.stringify({ jsonrpc: '2.0', id: id++, method: 'logsSubscribe', params: [{ mentions: [address] }, { commitment: 'processed' }] }));
       }
     };
     c.ws.onmessage = e => {
@@ -214,7 +216,7 @@ export function createLogStream({ url, programs, onLogs, onStatus, rotateMs = 12
       if (m.id) {
         if (m.error) onStatus?.('subscribe failed: ' + c.reqNames.get(m.id) + ' ' + m.error.message);
         else c.subNames.set(m.result, c.reqNames.get(m.id));
-        if (!c.ready && c.subNames.size === names.length) { c.ready = true; promote(c); }
+        if (!c.ready && c.subNames.size === subs.length) { c.ready = true; promote(c); }
         return;
       }
       if (m.method !== 'logsNotification') return;

@@ -18,8 +18,10 @@ chain logs. There's no third-party market-data API in between.
   A **DLMM list** ranks coins by live pools, the launches feed flags a coin the moment it gains a pool, and a record in
   the side panel compares how coins did afterwards by how many pools they had, so you can see whether more pools
   really goes with better results.
-- **Coverage**: Pump.fun (bonding curve and coins graduated to the Pump AMM), Raydium LaunchLab
-  (Stonk.fun, LetsBonk and other platforms) and Meteora DBC (Bags, Moonshot and others).
+- **Coverage**: Pump.fun (bonding curve and coins graduated to the Pump AMM), Raydium's launchpad LaunchLab
+  (Raydium's own launches and every platform on it: Stonk.fun, LetsBonk and others, and their coins after they
+  graduate to Raydium CPMM), Stonk.fun's direct
+  Raydium CLMM launches, and Meteora DBC (Bags, Moonshot and others).
 - **Genuine only filter**: hides rug pulls, wash trading, self-trading, active mint/freeze authority,
   implausible valuations, dust pools and launches 75% or more bundled.
 - **Bundler deployers**: a red flag next to the token name when the coin's deployer is a known bundler wallet
@@ -96,4 +98,6 @@ how to add another launchpad.
 - On the free public RPC, swaps arrive about 2 seconds after their block, and Meteora DBC swaps are
   sampled rather than complete. LaserStream removes the sampling and should cut the delay; its real-world
   latency hasn't been measured here yet (that needs a live key).
-- Coins that graduate from LaunchLab move to Raydium pools, which aren't tracked yet.
+- Swaps on Raydium CPMM pools (graduated LaunchLab coins) don't name the trader on the public feed, so they don't count
+  toward traders, Traction or the Traders view. Only the CLMM pools of Stonk.fun's 60 busiest direct Raydium launches are followed.
+- Older LaunchLab coins that graduated to Raydium's original AMM (v4), before new launches became CPMM-only, aren't tracked.

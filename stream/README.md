@@ -82,7 +82,9 @@ RPC path decodes. `node test/record-fixtures.mjs` re-records the fixtures.
 |---|---|---|
 | Pump.fun (bonding curve) | `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P` | `TradeEvent`, `CreateEvent`, `CompleteEvent` from logs |
 | PumpSwap: only tokens that graduated from a launchpad are shown (as "Pump.fun (graduated)"); `PUMPSWAP_ALL=1` shows every pool | `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA` | `BuyEvent` / `SellEvent` from logs |
-| Stonk.fun, LetsBonk, other LaunchLab platforms | `LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj` | `TradeEvent` / `PoolCreateEvent` from logs; platform name read from the pool's on-chain PlatformConfig |
+| Raydium LaunchLab, Raydium's launchpad: its own coins (shown as "Raydium LaunchLab") and every platform built on it (Stonk.fun, LetsBonk, ...) | `LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj` | `TradeEvent` / `PoolCreateEvent` from logs; platform name read from the pool's on-chain PlatformConfig. A trade reached through another program (a Jupiter route) can log its event cut short: that transaction is fetched and the full event read from it (see Raydium pools) |
+| LaunchLab coins after graduating: shown as "<platform> (graduated)", e.g. "Stonk.fun (graduated)" | `CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C` (Raydium CPMM) | `SwapEvent` from logs (pool, both vaults before the swap, both mints, amounts); only pools of launchpad coins are kept (see Raydium pools) |
+| Stonk.fun's direct Raydium launches: shown as "Stonk.fun · CLMM" | `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK` (Raydium CLMM), only the pools Stonk.fun lists | `SwapEvent` from logs (pool, trader, amounts, sqrt price); liquidity is the quote vault's balance, read every 30s |
 | Bags, Moonshot and other DBC launchpads | `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN` | `EvtSwap2` from inner instructions (needs `getTransaction`); launchpad label from Jupiter's token index |
 
 All byte offsets were checked against live mainnet transactions in October 2026. Programs upgrade, so if a
@@ -108,6 +110,7 @@ venue goes quiet, re-check its event layout first.
 | `SNAPSHOT` | on | `0` starts empty every time instead of restoring the last run (see Snapshot) |
 | `HOLDERS` | on | `0` turns off the top-holder scan (see Top holders) |
 | `TRADERS` | on | `0` stops following wallets (see Traders) |
+| `STONKFUN` | on | `0` stops reading Stonk.fun's coin list (see Raydium pools): no Stonk.fun labels before a coin's LaunchLab pool is seen, and no CLMM pools |
 | `DLMM` | on | `0` stops counting each coin's Meteora DLMM pools (see Meteora DLMM pools) |
 | `TRADER_WINDOW_MIN` | `60` | How many minutes of swaps the Traders view and an open coin's traders cover |
 | `WS_ROTATE_MS` | `12000` | How often the websocket feed is replaced before the RPC cuts it (see Staying connected); `0` turns it off |
@@ -535,6 +538,40 @@ old is ignored. In a test run, 1,195 pools and 89 followed launches came to 200 
 
 In a 300-coin test, about 290 logos loaded through the proxy, 6 loaded directly in the browser, and 3 were
 deleted at their source (HTTP 404), so those coins show a letter badge.
+
+## Raydium pools
+
+LaunchLab coins (Stonk.fun, LetsBonk and the other LaunchLab platforms) graduate to Raydium CPMM pools, and
+Stonk.fun also launches some coins straight onto Raydium CLMM pools. Both are tracked so these coins stay listed.
+
+- **CPMM** is followed whole (about 5 swaps a second, 2 MB per 30s of feed data), but most of its pools aren't
+  launchpad coins, so a pool is kept only when its coin came from one. A coin is known to have when its LaunchLab
+  pool was seen, when it is on Stonk.fun's list, or when its LaunchLab curve pool exists: that pool sits at
+  PDA(["pool", coin mint, quote mint]) under LaunchLab, so after a pool's 5th swap one account read settles it
+  (`launchLabPoolAddress` in `lib/decode.js`). The curve's platform names the venue, and its launch details pass to
+  the new pool, which replaces the curve in the lists. Other pools are ignored from then on. Coins known to come
+  from a launchpad are saved in the snapshot. The swap event carries both vaults' balances before the swap, so
+  price and liquidity come from the event itself. Its trader isn't in the logs, so these swaps don't count toward
+  traders, Traction or the Traders view on the public feed.
+- **CLMM** is far too busy to follow whole on the public RPC (about 15 MB per 30s), so the server subscribes to
+  individual pools instead: the CLMM pools of Stonk.fun's busiest direct Raydium launches (up to 60), on their
+  own websocket. Price comes from each swap's sqrt price, liquidity from the quote vault's balance (read every 30s).
+- **Stonk.fun's list** (`lib/stonkfun.js`): its 200 busiest coins from `stonkfun.xyz/api/public/v1/tokens?sort=volume`,
+  read every 10 minutes within its 60-a-minute limit. It labels them Stonk.fun before their LaunchLab pool is seen,
+  supplies the CLMM pools, and fills in names and logos the chain hasn't. Stonk.fun has about 200,000 coins in all;
+  graduates outside its top 200 are still found through their curve pool.
+
+- **LaunchLab trades logged cut short.** When a LaunchLab trade is reached through another program, its logged
+  `TradeEvent` can stop after 72 bytes (pool and virtual reserves only). The whole event is still in the
+  transaction, as LaunchLab's self-CPI event instruction, so the server fetches that transaction (after a second and a
+  half, once confirmed) and reads it from there; with LaserStream it is read inline. It is rare (none in 66 LaunchLab
+  trades in one 45s sample) but those trades used to be lost, and a coin trading only that way never appeared.
+  `/api/stats` → `launchlabShort` counts them.
+- **Not covered:** launches from before LaunchLab became CPMM-only could graduate to Raydium's original AMM (v4).
+  That program carries most of Raydium's volume and its logs name neither pool nor mints, so it isn't followed.
+
+`/api/stats` → `raydium` counts the coins known to come from a launchpad, the CPMM pools ignored, and the CLMM pools
+followed; `stonkfun` shows the last read of Stonk.fun's list.
 
 ## Graduations
 

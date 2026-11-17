@@ -8,7 +8,11 @@ export const PROGRAMS = {
   pumpswap: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',  // PumpSwap AMM (graduated pump tokens)
   launchlab: 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj', // Raydium LaunchLab (Stonk.fun, LetsBonk, ...)
   dbc: 'dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN',       // Meteora Dynamic Bonding Curve (Bags, ...)
+  cpmm: 'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C',     // Raydium CPMM: where LaunchLab coins graduate to
 };
+// Raydium CLMM: Stonk.fun launches some coins straight onto it. The whole program is too busy for the public feed
+// (about 15 MB per 30s), so only chosen pools are subscribed to (server.js), never the program.
+export const CLMM = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK';
 export const SOL = 'So11111111111111111111111111111111111111112';
 const SYSTEM = '11111111111111111111111111111111'; // an unset pubkey field
 export const EVENT_IX_TAG = 'e445a52e51cb9a1d'; // Anchor emit_cpi! prefix
@@ -23,6 +27,7 @@ const D = {
   poolCreate: disc('PoolCreateEvent'),
   swap2: disc('EvtSwap2'),
   createPool: disc('CreatePoolEvent'),
+  swapEvent: disc('SwapEvent'),       // Raydium CPMM and CLMM share this name, told apart by emitting program
 };
 
 export const pk = (b, o) => bs58.encode(b.subarray(o, o + 32));
@@ -97,6 +102,25 @@ export function decodeLogEvent(program, b) {
     };
   }
 
+  if (program === PROGRAMS.cpmm && d === D.swapEvent && b.length >= 170) {
+    // pool, input / output vault before the swap, input and output amounts, their transfer fees, base_input,
+    // input mint @89, output mint @121, trade fee, creator fee, creator fee taken on the input side.
+    // Which side is the launched coin is only known once the pool is (lib/market.js); the trader isn't in the logs.
+    return {
+      kind: 'trade', program: 'cpmm', pool: pk(b, 8), inMint: pk(b, 89), outMint: pk(b, 121),
+      inBefore: u64(b, 40), outBefore: u64(b, 48), inAmount: u64(b, 56), outAmount: u64(b, 64), user: null,
+    };
+  }
+
+  if (program === CLMM && d === D.swapEvent && b.length >= 205) {
+    // pool, sender @40, token accounts, amount_0 @136, transfer fee 0, amount_1 @152, transfer fee 1,
+    // zero_for_one @168 (token 0 in), sqrt price x64 @169 (token 1 per token 0, raw units), liquidity, tick
+    return {
+      kind: 'trade', program: 'clmm', pool: pk(b, 8), user: pk(b, 40),
+      amount0: u64(b, 136), amount1: u64(b, 152), zeroForOne: b[168] === 1, sqrtPrice: u128(b, 169),
+    };
+  }
+
   if (program === PROGRAMS.launchlab) {
     if (d === D.trade && b.length >= 147) {
       const buy = b[144] === 0, amountIn = u64(b, 96), amountOut = u64(b, 104);
@@ -128,6 +152,26 @@ export function decodeDbcEvent(b, signer = null) {
     quoteRaw: buy ? input : output, baseRaw: buy ? output : input,
     sqrtPrice: u128(b, 123), qRes: u64(b, 163), threshold: u64(b, 171), user: signer, ts: u64(b, 179),
   };
+}
+// A LaunchLab TradeEvent logged cut short: the program logs the event, but when it is reached through another
+// program (a Jupiter route, say) the logged copy can stop after its first 72 bytes (pool and virtual reserves only).
+// The whole event is still in the transaction, as LaunchLab's self-CPI event instruction (decodeInnerEvents).
+export const isCutShortTrade = (program, b) => program === PROGRAMS.launchlab && b.length >= 16 && b.length < 147 && b.subarray(0, 8).toString('hex') === D.trade;
+// Events a program emitted as self-CPI instructions in a fetched transaction (emit_cpi!), decoded like logged ones,
+// with the transaction's signer as the trader where the event doesn't name one.
+export function decodeInnerEvents(tx, program) {
+  const out = [];
+  const keys = [...tx.transaction.message.accountKeys, ...(tx.meta.loadedAddresses?.writable || []), ...(tx.meta.loadedAddresses?.readonly || [])];
+  for (const group of tx.meta.innerInstructions || []) {
+    for (const ix of group.instructions) {
+      if (keys[ix.programIdIndex] !== program) continue;
+      const raw = Buffer.from(bs58.decode(ix.data));
+      if (raw.length < 16 || raw.subarray(0, 8).toString('hex') !== EVENT_IX_TAG) continue;
+      const ev = decodeLogEvent(program, raw.subarray(8));
+      if (ev) { if (!ev.user) ev.user = keys[0] || null; out.push(ev); }
+    }
+  }
+  return out;
 }
 export function decodeDbcTx(tx) {
   const out = [];
@@ -202,6 +246,11 @@ export function metaplexMetadata(data) {
   const str = () => { const n = data.readUInt32LE(p); if (n > 400 || p + 4 + n > data.length) throw new Error('short'); const s = data.toString('utf8', p + 4, p + 4 + n); p += 4 + n; return s; };
   try { const name = clean(str()), symbol = clean(str()), uri = metaUri(str()); return name || symbol || uri ? { name, symbol, uri } : null; } catch { return null; }
 }
+
+// A LaunchLab coin's curve pool sits at PDA(["pool", coin mint, quote mint]). A Raydium CPMM pool whose coin has one
+// is a LaunchLab graduate, which is how graduated coins are recognised without any API (lib/market.js).
+export const launchLabPoolAddress = (mint, quoteMint) =>
+  programAddress([Buffer.from('pool'), Buffer.from(bs58.decode(mint)), Buffer.from(bs58.decode(quoteMint))], PROGRAMS.launchlab);
 
 // LaunchLab PlatformConfig: name is a fixed [u8; 64] at offset 112.
 export function platformName(data) {

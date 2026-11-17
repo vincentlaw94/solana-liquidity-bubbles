@@ -1,10 +1,15 @@
 // In-memory market state: one record per pool, rolling 5-minute trade windows and 1-minute buckets.
-import { pk, platformName, SOL } from './decode.js';
+import { pk, platformName, SOL, PROGRAMS, launchLabPoolAddress } from './decode.js';
 
 const W5 = 5 * 60e3;
 const PUMP_INITIAL_REAL_TOKENS = 793_100_000e6; // pump.fun curve sells 793.1M tokens (6 decimals) before graduating
 const PUMP_SUPPLY = 1_000_000_000;               // every pump.fun token mints exactly 1B
 const TAPE = 40;
+// Raydium pools of launchpad coins (lib/decode.js): CPMM is where LaunchLab coins graduate to; CLMM pools are
+// only those the server subscribes to (Stonk.fun's direct Raydium launches). A CPMM pool whose coin isn't known to
+// come from a launchpad is checked once it has traded CPMM_CHECK_AT times; one that isn't is ignored from then on.
+const CPMM_CHECK_AT = 5, LAUNCH_MINTS_MAX = 50000, VAULT_MS = 30e3;
+const u128 = (b, o) => Number(b.readBigUInt64LE(o) + (b.readBigUInt64LE(o + 8) << 64n));
 // Volume list windows: 1m from the swaps themselves; up to 1h from 1-minute buckets (the current minute plus the
 // ones before it); 4h to 24h from 1-hour buckets the same way
 export const VOL_WINDOWS = { '1m': { ms: 60e3 }, '15m': { mins: 15 }, '30m': { mins: 30 }, '1h': { mins: 60 }, '4h': { hours: 4 }, '12h': { hours: 12 }, '24h': { hours: 24 } };
@@ -48,7 +53,7 @@ export class Market {
   // pool fields a snapshot keeps (see dump)
   static KEEP = ['id', 'program', 'platform', 'mint', 'quoteMint', 'baseDec', 'quoteDec', 'quoteRes', 'price', 'progress', 'fundTarget',
     'graduated', 'successor', 'firstSeen', 'lastTs', 'lastEventAt', 'created', 'createdName', 'creator', 'baseSupply', 'quoteSupply',
-    'baseAuth', 'quoteAuth', 'peakQuoteRes', 'mins', 'hours', 'hiPx', 'hiAt'];
+    'baseAuth', 'quoteAuth', 'peakQuoteRes', 'mins', 'hours', 'hiPx', 'hiAt', 'baseIs0', 'quoteVault'];
 
   constructor({ accounts, meta, prices, emit, bundlers = null, launchBundles = null, pumpswapAll = false }) {
     // bundlers: isitbundled.com's wallet list; launchBundles: this server's own launch-bundle detector (lib/bundles.js)
@@ -57,7 +62,12 @@ export class Market {
     this.outbox = [];
     this.counts = { trades: 0, unresolvedDrops: 0 };
     this.startedAt = Date.now(); // traction compares against minutes this run actually watched
+    // coins launched on a launchpad other than pump.fun -> platform label: what lets their Raydium pools be listed
+    this.launchMints = new Map();
+    this.counts.cpmmIgnored = 0;
     setInterval(() => this.evict(), 60e3).unref?.();
+    // a CLMM pool's liquidity is its quote vault's balance: read every 30s (swaps move it in between)
+    setInterval(() => this.refreshVaults().catch(() => {}), VAULT_MS).unref?.();
   }
 
   static blank(id, program) {
@@ -74,20 +84,64 @@ export class Market {
       p = Market.blank(id, program);
       if (program === 'pump') Object.assign(p, { mint: id.slice(5), quoteMint: SOL, baseDec: 6, quoteDec: 9, baseSupply: PUMP_SUPPLY, ready: true });
       this.pools.set(id, p);
-      // PumpSwap has a long tail of near-dead pools: only spend RPC on ones that keep trading
-      if (p.ready) this.meta.request(p.mint); else if (program !== 'pumpswap') this.resolve(p);
+      // PumpSwap and CPMM have long tails of pools that aren't launchpad coins: only spend RPC on ones that keep trading
+      if (p.ready) this.meta.request(p.mint); else if (program !== 'pumpswap' && program !== 'cpmm') this.resolve(p);
     }
     return p;
+  }
+
+  // a coin launched on a launchpad other than pump.fun (from its LaunchLab pool, Stonk.fun's list or a snapshot)
+  noteLaunch(mint, platform) {
+    if (!mint) return;
+    const had = this.launchMints.get(mint);
+    if (had === undefined || (platform && had !== platform && (!had || had === 'Raydium LaunchLab'))) this.launchMints.set(mint, platform || had || null);
+    while (this.launchMints.size > LAUNCH_MINTS_MAX) this.launchMints.delete(this.launchMints.keys().next().value);
+  }
+  launchDump() { return [...this.launchMints]; }
+  launchRestore(list) { for (const [m, p] of list || []) this.noteLaunch(m, p); }
+
+  // Which side of a CPMM pool is a launchpad coin: one already known, or else one whose LaunchLab curve pool exists
+  // (a graduate). Returns [coin mint, platform label] or null.
+  async cpmmCoin(a, b) {
+    for (const m of [a, b]) if (this.launchMints.has(m) && !MAJORS.has(m)) return [m, this.launchMints.get(m)];
+    const cands = [[a, b], [b, a]].filter(([m]) => !MAJORS.has(m)).map(([m, q]) => [m, launchLabPoolAddress(m, q)]);
+    const accs = await Promise.all(cands.map(([, at]) => this.accounts.get(at, true)));
+    cands.forEach(([, at]) => this.accounts.forget(at));
+    const i = accs.findIndex(x => x && x.owner === PROGRAMS.launchlab && x.data.length >= 205);
+    if (i < 0) return null;
+    const plat = await this.accounts.get(pk(accs[i].data, 173));
+    const label = launchLabLabel(platformName(plat?.data));
+    this.noteLaunch(cands[i][0], label);
+    return [cands[i][0], label];
   }
 
   async resolve(p) {
     try {
       p.resolving = true;
-      const a = await this.accounts.get(p.id, p.program === 'pumpswap');
+      const a = await this.accounts.get(p.id, p.program === 'pumpswap' || p.program === 'cpmm');
       if (!a) throw new Error('pool account missing');
       const b = a.data;
       if (p.program === 'pumpswap') {
         p.mint = pk(b, 43); p.quoteMint = pk(b, 75);
+      } else if (p.program === 'cpmm') {
+        // CPMM pool: token mints @168 / @200, their decimals @331 / @332
+        const m0 = pk(b, 168), m1 = pk(b, 200), coin = await this.cpmmCoin(m0, m1);
+        if (!coin) { this.ignore(p); return; }
+        p.baseIs0 = coin[0] === m0;
+        p.mint = coin[0]; p.quoteMint = p.baseIs0 ? m1 : m0;
+        p.baseDec = p.baseIs0 ? b[331] : b[332]; p.quoteDec = p.baseIs0 ? b[332] : b[331];
+        p.platform = coin[1];
+        this.handOver(p);
+      } else if (p.program === 'clmm') {
+        // CLMM pool: mints @73 / @105, vaults @137 / @169, decimals @233 / @234, sqrt price x64 @253
+        const m0 = pk(b, 73), m1 = pk(b, 105);
+        const base = this.launchMints.has(m0) && !MAJORS.has(m0) ? m0 : this.launchMints.has(m1) ? m1 : MAJORS.has(m0) ? m1 : m0;
+        p.baseIs0 = base === m0;
+        p.mint = base; p.quoteMint = p.baseIs0 ? m1 : m0;
+        p.baseDec = p.baseIs0 ? b[233] : b[234]; p.quoteDec = p.baseIs0 ? b[234] : b[233];
+        p.quoteVault = pk(b, p.baseIs0 ? 169 : 137);
+        p.platform = this.launchMints.get(base) || null;
+        p.price = this.clmmPrice(p, u128(b, 253)); // until its first swap
       } else if (p.program === 'launchlab') {
         p.baseDec = b[18]; p.quoteDec = b[19];
         p.fundTarget = Number(b.readBigUInt64LE(69));
@@ -95,6 +149,7 @@ export class Market {
         p.creator = pk(b, 333); // pool creator: the launcher, or the platform's wallet on some platforms
         const plat = await this.accounts.get(pk(b, 173));
         p.platform = launchLabLabel(platformName(plat?.data));
+        this.noteLaunch(p.mint, p.platform); // its Raydium pool after graduation is listed too
       } else if (p.program === 'dbc') {
         p.mint = pk(b, 136);
         p.creator = pk(b, 104); // pool creator: the launcher, or the launchpad's wallet (e.g. Bags)
@@ -104,12 +159,44 @@ export class Market {
       }
       this.accounts.forget(p.id);
       await this.finish(p);
+      if (p.program === 'clmm') await this.refreshVaults([p]);
     } catch {
       p.failures = (p.failures || 0) + 1;
       p.resolving = false;
       if (p.failures < 3) setTimeout(() => this.resolve(p), 5000 * p.failures);
       else this.pools.delete(p.id);
     }
+  }
+
+  // a CPMM pool that isn't a launchpad coin's: forget its swaps and drop the ones that follow (evicted when quiet)
+  ignore(p) {
+    Object.assign(p, { ignored: true, resolving: false, pending: [] });
+    this.counts.cpmmIgnored++;
+    this.accounts.forget(p.id);
+  }
+  // a graduate's new pool takes over its curve's launch details; the curve is done
+  handOver(p) {
+    for (const c of this.pools.values()) {
+      if (c.program !== 'launchlab' || c.mint !== p.mint || c === p) continue;
+      Object.assign(c, { graduated: true, progress: 1, successor: p.id });
+      p.created = p.created || c.created; p.createdName = p.createdName || c.createdName; p.creator = p.creator || c.creator;
+    }
+  }
+  // CLMM price in quote per coin, from a sqrt price x64 (token 1 per token 0 in raw units)
+  clmmPrice(p, sqrtX64) {
+    const s = sqrtX64 / 2 ** 64, raw = s * s; // token1 per token0, raw
+    const px = raw * 10 ** ((p.baseIs0 ? p.baseDec : p.quoteDec) - (p.baseIs0 ? p.quoteDec : p.baseDec));
+    return p.baseIs0 ? px : px > 0 ? 1 / px : 0;
+  }
+  // CLMM liquidity: the quote vault's balance (token account amount @64)
+  async refreshVaults(list = [...this.pools.values()].filter(p => p.program === 'clmm' && p.ready && p.quoteVault)) {
+    await Promise.all(list.map(async p => {
+      const a = await this.accounts.get(p.quoteVault, true);
+      this.accounts.forget(p.quoteVault);
+      if (!(a?.data.length >= 72)) return;
+      p.quoteRes = Number(a.data.readBigUInt64LE(64)) / 10 ** p.quoteDec;
+      if (p.quoteRes > (p.peakQuoteRes || 0)) p.peakQuoteRes = p.quoteRes;
+    }));
   }
 
   // Once a pool's mints are known: read both mint accounts (supply, decimals, authorities) and go live.
@@ -136,11 +223,15 @@ export class Market {
       const p = this.pool(ev.pool, ev.program);
       ev.at = Date.now();
       p.lastEventAt = ev.at;
+      if (p.ignored) return;
       if (p.ready) this.apply(p, ev);
       else if (p.pending.length < 50) p.pending.push(ev);
       else this.counts.unresolvedDrops++;
-      // PumpSwap is mostly long-tail noise: only look a pool up once it has traded 10 times
-      if (!p.ready && !p.resolving && p.pending.length >= (p.program === 'pumpswap' ? 10 : 3)) this.resolve(p);
+      // PumpSwap is mostly long-tail noise: only look a pool up once it has traded 10 times. A CPMM pool of a coin
+      // already known to be a launchpad's is looked up at once, any other after CPMM_CHECK_AT swaps
+      const known = p.program === 'cpmm' && (this.launchMints.has(ev.inMint) || this.launchMints.has(ev.outMint));
+      const need = p.program === 'pumpswap' ? 10 : p.program === 'cpmm' ? (known ? 1 : CPMM_CHECK_AT) : 3;
+      if (!p.ready && !p.resolving && p.pending.length >= need) this.resolve(p);
     } else if (ev.kind === 'create') {
       if (ev.mint) { this.meta.set(ev.mint, { symbol: ev.symbol, name: ev.name }); this.meta.setUri?.(ev.mint, ev.uri); }
       const p = this.pool(ev.pool, ev.program);
@@ -175,6 +266,7 @@ export class Market {
 
   apply(p, ev, replay = false) {
     if (ev.creator && !p.creator) p.creator = ev.creator;
+    if (p.program === 'cpmm' || p.program === 'clmm') this.raydium(p, ev);
     const qd = 10 ** p.quoteDec, bd = 10 ** p.baseDec;
     const quote = ev.quoteRaw / qd, base = ev.baseRaw / bd;
     if (p.program === 'pump') {
@@ -232,6 +324,26 @@ export class Market {
     this.onTrade?.();
   }
 
+  // A Raydium swap in terms of the coin: which way it went, its two amounts, and the pool's price and quote reserve
+  // after it. CPMM events carry both vaults' balances before the swap; CLMM events the new sqrt price, and the
+  // reserve is the vault balance read every 30s, moved by each swap in between.
+  raydium(p, ev) {
+    const qd = 10 ** p.quoteDec, bd = 10 ** p.baseDec;
+    if (p.program === 'cpmm') {
+      const baseIn = ev.inMint === p.mint;
+      const inAfter = ev.inBefore + ev.inAmount, outAfter = Math.max(0, ev.outBefore - ev.outAmount);
+      const baseRes = baseIn ? inAfter : outAfter, quoteRes = baseIn ? outAfter : inAfter;
+      ev.buy = !baseIn; ev.baseRaw = baseIn ? ev.inAmount : ev.outAmount; ev.quoteRaw = baseIn ? ev.outAmount : ev.inAmount;
+      if (baseRes > 0) p.price = (quoteRes / qd) / (baseRes / bd);
+      p.quoteRes = quoteRes / qd;
+    } else {
+      const baseIn = p.baseIs0 ? ev.zeroForOne : !ev.zeroForOne;
+      ev.buy = !baseIn; ev.baseRaw = p.baseIs0 ? ev.amount0 : ev.amount1; ev.quoteRaw = p.baseIs0 ? ev.amount1 : ev.amount0;
+      p.price = this.clmmPrice(p, ev.sqrtPrice);
+      p.quoteRes = Math.max(0, p.quoteRes + (baseIn ? -1 : 1) * ev.quoteRaw / qd);
+    }
+  }
+
   // Drop swaps and buckets that left their windows, keeping the running totals in step. Cost is
   // proportional to what expired, not to the window size.
   prune(p, now) {
@@ -276,6 +388,8 @@ export class Market {
     if (p.program === 'pump') return 'Pump.fun';
     if (p.program === 'pumpswap') return this.pumpswapAll ? 'PumpSwap' : 'Pump.fun (graduated)';
     if (p.program === 'launchlab') return p.platform || 'Raydium LaunchLab';
+    if (p.program === 'cpmm') return (p.platform || this.launchMints.get(p.mint) || 'LaunchLab') + ' (graduated)';
+    if (p.program === 'clmm') return (p.platform || this.launchMints.get(p.mint) || 'Raydium') + ' · CLMM';
     return dbcLabel(this.meta.get(p.mint)?.launchpad);
   }
 
@@ -290,6 +404,7 @@ export class Market {
     for (const p of this.pools.values()) {
       if (!p.ready) continue;
       if (p.program === 'pump' && p.graduated) continue; // a completed curve is frozen; the coin lives on in its AMM pool
+      if (p.program === 'launchlab' && p.successor) continue; // likewise once its Raydium pool has been found
       this.prune(p, now);
       const qUsd = this.prices.get(p.quoteMint);
       if (!qUsd || !(p.quoteRes > 0)) continue;
