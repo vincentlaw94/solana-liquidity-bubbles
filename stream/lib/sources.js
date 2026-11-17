@@ -418,9 +418,17 @@ const STABLES = ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJ
 // USD prices for quote tokens. SOL (which values most pools) comes from exchange tickers every 2s;
 // other quote tokens (stock tokens, launched tokens used as quotes) from Jupiter every 20s.
 // A price, once known, is kept when a refresh fails.
+// Quote tokens Jupiter has no price for can still be priced from this server's own pools: the market hands over the
+// USD price of every coin it trades against a priced token with real liquidity (setDerived, each ranking tick), and
+// get() falls back to it. So a coin paired against another pump.fun coin is listed even while Jupiter is rate-limited.
+// Jupiter is asked in rotation, never-asked tokens first, up to JUP_BATCHES x 50 tokens a round, one round at a time.
+const JUP_BATCHES = 4;
 export function createPrices() {
   const prices = new Map(STABLES.map(m => [m, 1])), tracked = new Set();
-  const stats = { solSource: null, solAt: 0 };
+  const asked = new Map();     // mint -> when Jupiter was last asked for it
+  let derived = new Map();     // mint -> USD price from this server's own pools
+  let running = false;
+  const stats = { solSource: null, solAt: 0, rounds: 0 };
   async function solPrice() {
     const sources = [
       ['coinbase', 'https://api.coinbase.com/v2/prices/SOL-USD/spot', j => +j.data.amount],
@@ -436,21 +444,39 @@ export function createPrices() {
     }
   }
   async function others() {
-    const ids = [...tracked].filter(id => id !== SOL_MINT && !STABLES.includes(id));
-    for (let i = 0; i < ids.length; i += 50) {
-      try {
-        const j = await jupiter.get('https://lite-api.jup.ag/price/v3?ids=' + ids.slice(i, i + 50).join(','));
-        for (const [id, v] of Object.entries(j)) if (v?.usdPrice) prices.set(id, v.usdPrice);
-      } catch {}
-    }
+    if (running) return; // a round still waiting on Jupiter's pacing: don't queue another behind it
+    running = true;
+    try {
+      const ids = [...tracked].filter(id => id !== SOL_MINT && !STABLES.includes(id))
+        .sort((a, b) => (asked.get(a) || 0) - (asked.get(b) || 0)) // never asked first, then longest ago
+        .slice(0, 50 * JUP_BATCHES);
+      for (let i = 0; i < ids.length; i += 50) {
+        const batch = ids.slice(i, i + 50);
+        try {
+          const j = await jupiter.get('https://lite-api.jup.ag/price/v3?ids=' + batch.join(','));
+          const t = Date.now();
+          for (const id of batch) asked.set(id, t); // a failed call leaves them first in line
+          for (const [id, v] of Object.entries(j)) if (v?.usdPrice) prices.set(id, v.usdPrice);
+        } catch {}
+      }
+      stats.rounds++;
+    } finally { running = false; }
   }
   let soon = null;
   setInterval(solPrice, 2000);
   setInterval(others, 20000);
   solPrice();
   return {
-    get: id => prices.get(id),
+    // Jupiter's (or the exchanges') price, else the one from this server's own pools
+    get: id => prices.get(id) ?? derived.get(id),
+    direct: id => prices.get(id),
+    setDerived: map => { derived = map; },
     track: id => { if (id && !tracked.has(id)) { tracked.add(id); if (!prices.has(id) && !soon) soon = setTimeout(() => { soon = null; others(); }, 1500); } },
     stats,
+    counts: () => {
+      let fromPools = 0;
+      for (const id of tracked) if (!prices.has(id) && derived.has(id)) fromPools++;
+      return { tracked: tracked.size, fromJupiter: [...tracked].filter(id => prices.has(id)).length, fromPools, rounds: stats.rounds };
+    },
   };
 }

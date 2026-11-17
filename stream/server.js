@@ -500,6 +500,8 @@ function stats() {
     tradesPerSec: +tps.toFixed(1), perProgram: rate.perSec, pools: market.pools.size, trades: market.counts.trades,
     solPrice: prices.get('So11111111111111111111111111111111111111112') || null, solPriceSource: prices.stats.solSource,
     solPriceAgeMs: prices.stats.solAt ? now - prices.stats.solAt : null, jupiter: jupiterStats,
+    // quote tokens: how many are priced by Jupiter, and how many only from this server's own pools
+    quotePrices: prices.counts(),
     bundlerWallets: bundlers.state,
     launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm?.stats() || null,
     raydium: { launchMints: market.launchMints.size, cpmmIgnored: market.counts.cpmmIgnored, clmmPools: clmmFeed.pools, clmmConnected: clmmFeed.stream?.connected ?? null },

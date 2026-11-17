@@ -584,7 +584,14 @@ the dashboard follows the coin to its new pool.
 
 SOL/USD comes from Coinbase every 2s (Binance as fallback). USDC and USDT are fixed at $1. Other quote tokens,
 plus token icons, holder counts and creation times, come from Jupiter through one paced queue that pauses for 30s
-whenever Jupiter rate-limits and then spaces its calls further apart (names come from the chain: see Coin names). A price, once known, is kept if a refresh fails.
+whenever Jupiter rate-limits and then spaces its calls further apart (names come from the chain: see Coin names).
+Jupiter is asked in rotation, tokens never asked first, up to 200 a round, one round at a time.
+
+Coins paired against another token instead of SOL or USDC (another pump.fun coin, a stock token, a new stablecoin)
+need that token's price to be listed at all. When Jupiter has none, the server prices it from its own pools: the
+pair token's most liquid pool against a priced token, if it holds $2K+ and traded in the last 30 minutes. Up to two
+hops (a coin paired against a coin that is itself paired against a priced token). `/api/stats` → `quotePrices`
+counts the pair tokens priced by Jupiter and those priced only from the server's own pools. A price, once known, is kept if a refresh fails.
 
 ## Definitions
 

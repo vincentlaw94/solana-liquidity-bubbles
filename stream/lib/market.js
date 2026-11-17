@@ -9,6 +9,9 @@ const TAPE = 40;
 // only those the server subscribes to (Stonk.fun's direct Raydium launches). A CPMM pool whose coin isn't known to
 // come from a launchpad is checked once it has traded CPMM_CHECK_AT times; one that isn't is ignored from then on.
 const CPMM_CHECK_AT = 5, LAUNCH_MINTS_MAX = 50000, VAULT_MS = 30e3;
+// a pool prices its coin for use as another pool's quote token only with this much liquidity (USD), and only if it
+// has traded in the last 30 minutes: a dust pool's price is too easy to push around
+const DERIVE_MIN_LIQ = 2000, DERIVE_MAX_AGE = 30 * 60e3;
 const u128 = (b, o) => Number(b.readBigUInt64LE(o) + (b.readBigUInt64LE(o + 8) << 64n));
 // Volume list windows: 1m from the swaps themselves; up to 1h from 1-minute buckets (the current minute plus the
 // ones before it); 4h to 24h from 1-hour buckets the same way
@@ -398,9 +401,40 @@ export class Market {
     return q ? quoteAmount * q : null;
   }
 
+  // USD prices of coins traded here against a token with a price (SOL, USDC, a Jupiter price), from each coin's most
+  // liquid such pool. They price pools that pair a coin against one of those coins instead of SOL or USDC
+  // (prices.get falls back to them). Two hops at most: a coin paired against a coin that is itself paired against a
+  // priced token. A coin with a price of its own keeps it.
+  deriveQuotePrices(now = Date.now()) {
+    if (!this.prices.setDerived) return;
+    const pools = [];
+    for (const p of this.pools.values()) {
+      if (!p.ready || !(p.price > 0) || p.successor || (p.program === 'pump' && p.graduated) || now - p.lastTs > DERIVE_MAX_AGE) continue;
+      if (MAJORS.has(p.mint)) continue; // a flipped pool: its coin is the quote side
+      pools.push(p);
+    }
+    const derived = new Map();
+    for (let hop = 0; hop < 2; hop++) {
+      const best = new Map();
+      for (const p of pools) {
+        if (this.prices.direct(p.mint) || derived.has(p.mint)) continue;
+        const q = this.prices.direct(p.quoteMint) ?? derived.get(p.quoteMint);
+        if (!q) continue;
+        const liq = p.quoteRes * q;
+        if (!(liq >= DERIVE_MIN_LIQ)) continue;
+        const b = best.get(p.mint);
+        if (!b || liq > b.liq) best.set(p.mint, { usd: p.price * q, liq });
+      }
+      if (!best.size) break;
+      for (const [m, v] of best) derived.set(m, v.usd);
+    }
+    this.prices.setDerived(derived);
+  }
+
   // Flat view of every priced pool; the server picks a subset per client.
   rows() {
     const now = Date.now(), out = [];
+    this.deriveQuotePrices(now);
     for (const p of this.pools.values()) {
       if (!p.ready) continue;
       if (p.program === 'pump' && p.graduated) continue; // a completed curve is frozen; the coin lives on in its AMM pool
