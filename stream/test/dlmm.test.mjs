@@ -37,7 +37,7 @@ test('open coins are read first, then listed ones, then the background set, each
   clock.t += 3 * 60e3;                               // listed coins are due, the background one not for 15 minutes
   for (let i = 0; i < 5; i++) await d.tick();
   assert.deepEqual(asked.slice(5), ['OPEN', 'A', 'B']);
-  assert.deepEqual(d.row('A'), { dlmmPools: 1, dlmmLive: 1, dlmmTvl: 500, dlmmVol24: 1000, dlmmNew1h: 0, dlmmNew24: 0, dlmmNewest: null });
+  assert.deepEqual(d.row('A'), { dlmmPools: 1, dlmmLive: 1, dlmmTvl: 500, dlmmVol24: 1000, dlmmNew1h: 0, dlmmNew24: 0, dlmmNewest: null, dlmmWatched: 0 });
   assert.equal(d.row('never'), null);
   assert.equal(d.report('A').list.length, 1);
 });

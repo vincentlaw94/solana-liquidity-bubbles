@@ -181,6 +181,8 @@ section { padding: 14px 16px; border-bottom: 1px solid var(--line); display: gri
 .feed .k { font-size: 10px; font-weight: 500; letter-spacing: .06em; }
 .feed .k.new { color: var(--buy); } .feed .k.grad { color: var(--accent); }
 .feed .k.dd { color: var(--sell); } .feed .k.ath { color: var(--buy); } .feed .k.dlmm { color: #c38bff; }
+.feed .k.dlmmOut { color: var(--sell); } .feed .k.dlmmIn { color: var(--buy); }
+.live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--buy); margin-right: 5px; vertical-align: middle; }
 #dlmmSection table.bw td:first-child { font-weight: 600; }
 #dlmmSection table.bw tr.best td { color: var(--buy); }
 .note { margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--muted); }
@@ -720,6 +722,7 @@ function fromStream(r, i) {
     // Meteora DLMM pools (null until read): all of them, those with real liquidity, their liquidity and 24h volume
     // together, how many opened in the last 24h, and when the newest did
     dlmmPools: r.dlmmPools ?? null, dlmmLive: r.dlmmLive || 0, dlmmTvl: r.dlmmTvl || 0, dlmmVol24: r.dlmmVol24 || 0, dlmmNew1h: r.dlmmNew1h || 0, dlmmNew24: r.dlmmNew24 || 0, dlmmNewest: r.dlmmNewest || null,
+    dlmmWatched: r.dlmmWatched || 0, // how many of its DLMM pools the server watches live (their vault balances)
     // top-holder scan (server): biggest single wallet's % of supply, the 10 biggest wallets' together, and how many
     // wallets hold over HOLDER_FLAG (pools, bonding curves and the burn address don't count)
     topHolder: r.topHolderPct ?? null, top10: r.top10Pct ?? null, whales: r.whales || 0,
@@ -886,7 +889,9 @@ function pushFeed(ev) {
   feed.unshift(ev);
   const b = document.createElement('button');
   b.type = 'button'; b.className = 'fresh'; b.dataset.pool = ev.pool;
-  const [kc, kt] = { graduate: ['grad', 'GRAD'], drawdown: ['dd', '−80%'], athReset: ['ath', 'ATH'], dlmm: ['dlmm', 'DLMM'] }[ev.kind] || ['new', 'NEW'];
+  const [kc, kt] = { graduate: ['grad', 'GRAD'], drawdown: ['dd', '−80%'], athReset: ['ath', 'ATH'], dlmm: ['dlmm', 'DLMM'], dlmmOut: ['dlmmOut', 'LP −'], dlmmIn: ['dlmmIn', 'LP +'] }[ev.kind] || ['new', 'NEW'];
+  if (ev.kind === 'dlmmOut' || ev.kind === 'dlmmIn') b.title = ev.symbol + ': ' + usd(ev.usd) + ' of liquidity ' + (ev.kind === 'dlmmOut' ? 'pulled from' : 'added to') +
+    ' a Meteora DLMM pool, seen live on-chain (' + usd(ev.before) + ' → ' + usd(ev.after) + '). ' + ev.live + ' of its ' + ev.pools + ' DLMM pools are live now';
   if (ev.kind === 'dlmm') b.title = ev.symbol + ' gained ' + ev.added + ' Meteora DLMM pool' + (ev.added > 1 ? 's' : '') + ': now ' + ev.pools + ', ' + ev.live + ' live';
   if (ev.kind === 'drawdown') b.title = ev.symbol + ' fell 80% from its ' + usd(ev.ath) + ' high (now ' + usd(ev.mcap) + ')';
   else if (ev.kind === 'athReset') b.title = ev.symbol + ' made a new high of ' + usd(ev.ath) + ' after an 80% drawdown: watch reset';
@@ -1517,7 +1522,8 @@ function dlmmTip(n) {
   if (!n.dlmmPools) return 'No Meteora DLMM pools for this coin';
   return n.dlmmPools + ' Meteora DLMM pool' + (n.dlmmPools > 1 ? 's' : '') + ', ' + n.dlmmLive + ' with $' + DLMM_LIVE + '+ liquidity' +
     ' · liquidity ' + usd(n.dlmmTvl || 0) + ' · 24h volume ' + usd(n.dlmmVol24 || 0) +
-    (n.dlmmNew24 ? ' · ' + n.dlmmNew24 + ' opened in the last 24h' : '') + (n.dlmmNewest ? ' · newest ' + ago(n.dlmmNewest) + ' ago' : '');
+    (n.dlmmNew24 ? ' · ' + n.dlmmNew24 + ' opened in the last 24h' : '') + (n.dlmmNewest ? ' · newest ' + ago(n.dlmmNewest) + ' ago' : '') +
+    (n.dlmmWatched ? ' · ' + n.dlmmWatched + ' watched live on-chain' : ' · read from Meteora every few minutes');
 }
 const DLMM_LIVE = 100; // stream/lib/dlmm.js LIVE_TVL
 let dlmmFor = null;
@@ -1527,7 +1533,7 @@ async function loadDlmm(n) {
   dlmmFor = n.mint;
   const { status, body: r } = await getJson('/api/dlmm?mint=' + encodeURIComponent(n.mint));
   if (dlmmFor !== n.mint || !box.isConnected) return;
-  const head = '<div class="label">Meteora DLMM pools' + (r?.at ? ' · read ' + ago(r.at) + ' ago' : '') + '</div>';
+  const head = '<div class="label">Meteora DLMM pools' + (r?.watched ? ' · <span class="live-dot"></span>' + r.watched + ' watched live' : '') + (r?.at ? ' · read ' + ago(r.at) + ' ago' : '') + '</div>';
   if (status === 202) { setH(box, head + '<div class="bsum">Looking up this coin’s DLMM pools…</div>'); return; }
   if (status !== 200 || !r) { setH(box, head + '<div class="bsum">' + esc(r?.error || 'Couldn’t load the DLMM pools.') + '</div>'); return; }
   if (!r.pools) { setH(box, head + '<div class="bsum">No DLMM pools for this coin yet.</div>'); return; }
@@ -1536,11 +1542,12 @@ async function loadDlmm(n) {
       ' · liquidity <b>' + usd(r.tvl) + '</b> · 24h volume <b>' + usd(r.vol24) + '</b>' +
       (r.new24 ? '<br><b class="up">' + r.new24 + ' opened in the last 24h</b>' + (r.newest ? ', newest ' + ago(r.newest) + ' ago' : '') : '') + '</div>' +
     '<table class="bw nums"><thead><tr><th>Pool</th><th title="Price step between bins, in basis points">Bin</th><th>Liquidity</th><th>Vol 24h</th><th>Age</th></tr></thead><tbody>' +
-    r.list.map(p => '<tr class="' + (p.tvl < r.liveTvl ? 'dim' : '') + '"><td><a href="https://app.meteora.ag/dlmm/' + encodeURIComponent(p.address) + '" target="_blank" rel="noopener" title="' + esc(p.name + (p.baseFeePct != null ? ' · base fee ' + p.baseFeePct + '%' : '') + ' · open on Meteora') + '">' + esc((p.quote ? n.sym + '-' + p.quote : p.name) || short(p.address)) + ' ↗</a></td>' +
+    r.list.map(p => '<tr class="' + (p.tvl < r.liveTvl ? 'dim' : '') + '"><td>' + (p.watched ? '<span class="live-dot" title="Liquidity watched live on-chain' + (p.liveAt ? ', last changed ' + ago(p.liveAt) + ' ago' : '') + '"></span>' : '') + '<a href="https://app.meteora.ag/dlmm/' + encodeURIComponent(p.address) + '" target="_blank" rel="noopener" title="' + esc(p.name + (p.baseFeePct != null ? ' · base fee ' + p.baseFeePct + '%' : '') + ' · open on Meteora') + '">' + esc((p.quote ? n.sym + '-' + p.quote : p.name) || short(p.address)) + ' ↗</a></td>' +
       '<td>' + (p.binStep ?? '–') + '</td><td>' + usd(p.tvl) + '</td><td>' + usd(p.vol24) + '</td><td>' + (p.created ? ago(p.created) : '–') + '</td></tr>').join('') +
     '</tbody></table>' + (r.pools > r.list.length ? '<div class="bsum">' + (r.pools - r.list.length) + ' more, smaller pools not shown</div>' : ''));
 }
-setInterval(() => { if (state.selected && $('dlmmBox') && !document.hidden) loadDlmm(state.selected); }, 15000);
+// every 3s: the open coin's pools are watched live, so their liquidity can change between any two looks
+setInterval(() => { if (state.selected && $('dlmmBox') && !document.hidden) loadDlmm(state.selected); }, 3000);
 
 // the DLMM record (stream/lib/dlmm-record.js): how coins did after their first DLMM read, by live pools then
 function renderDlmmRecord(s) {

@@ -14,10 +14,21 @@
 // liquidity and 24h volume together, `new1h` / `new24` (pools opened in the last hour / 24 hours) and when the
 // newest one opened. Two callbacks report what a read found: onRead(mint, summary, first) after every read, and
 // onNew({ mint, added, ... }) when a coin has more pools than at its previous read.
+//
+// Live liquidity. Reads are minutes apart, so the pools of the coins people are looking at are also watched on-chain:
+// every pool of a coin someone has open, and the live pools of coins on their lists (planWatch picks them; server.js
+// subscribes to their two reserve vaults through lib/account-watch.js and passes each new balance to applyVault).
+// A pool's liquidity is then its two balances at current prices, updated the moment either changes, and the coin's
+// live count and liquidity with it. Swaps move one vault up and the other down; liquidity being pulled lowers both,
+// and being added raises both. So once a pool settles (SETTLE_MS without a change), a move where neither side rose
+// (or neither fell) and the value changed by MOVE_USD and MOVE_SHARE or more, valued before and after at the same
+// prices, is reported through onLiquidity({ mint, pool, kind: 'out' | 'in', usd, before, after, ... }).
 export const DLMM_API = 'https://dlmm.datapi.meteora.ag/pools';
 export const LIVE_TVL = 100;      // USD: a pool with less than this is empty, or as good as
 const OPEN_MS = 30e3, LISTED_MS = 3 * 60e3, BACKGROUND_MS = 15 * 60e3, RETRY_MS = 60e3, PAUSE_MS = 30e3;
 const PAGE = 100, MAX_PAGES = 5, TICK_MS = 350, KEEP = 20000, LIST_KEEP = 25;
+export const MOVE_USD = 250, MOVE_SHARE = 0.15;
+const SETTLE_MS = 1200;
 
 // one coin's pools -> what a list row carries, and the pool list the open coin shows
 export function summarize(mint, pools, now = Date.now()) {
@@ -35,15 +46,64 @@ export function summarize(mint, pools, now = Date.now()) {
     address: p.address, name: p.name, tvl: +p.tvl || 0, vol24: +p.volume?.['24h'] || 0, fees24: +p.fees?.['24h'] || 0,
     binStep: p.pool_config?.bin_step ?? null, baseFeePct: p.pool_config?.base_fee_pct ?? null, created: +p.created_at || null,
     quote: (p.token_x?.address === mint ? p.token_y : p.token_x)?.symbol || null,
+    // for watching it live: its reserve vaults, both mints and decimals, Meteora's USD prices and token amounts
+    rx: p.reserve_x || null, ry: p.reserve_y || null, mx: p.token_x?.address, my: p.token_y?.address,
+    dx: p.token_x?.decimals ?? null, dy: p.token_y?.decimals ?? null, px: +p.token_x?.price || 0, py: +p.token_y?.price || 0,
+    ux: +p.token_x_amount || 0, uy: +p.token_y_amount || 0,
   })).sort((a, b) => b.tvl - a.tvl);
   return { pools: mine.length, live, tvl, vol24, new1h, new24, newest: newest || null, list };
 }
 
-export function createDlmm({ fetchJson = defaultFetch, log = () => {}, now = Date.now, onRead = null, onNew = null } = {}) {
+// a coin's totals from its pool list (after a pool's liquidity changed live)
+function recount(s) {
+  let live = 0, tvl = 0;
+  for (const p of s.list) { tvl += p.tvl; if (p.tvl >= LIVE_TVL) live++; }
+  s.live = live; s.tvl = tvl;
+}
+
+export function createDlmm({ fetchJson = defaultFetch, log = () => {}, now = Date.now, onRead = null, onNew = null, onLiquidity = null, priceOf = null } = {}) {
   // mint -> { at, summary, retryAt?, stale? }: `stale` marks counts restored from a snapshot (no pool list yet)
   const cache = new Map();
   let open = [], listed = [], background = [], busy = false, pausedUntil = 0;
   const stats = { reads: 0, failed: 0, limited: 0, lastError: null, newPools: 0 };
+
+  // ---- live liquidity ----
+  const watched = new Map();      // pool -> { coins: Set(mint), x: side, y: side, base: { x, y }, timer, at }
+  const byVault = new Map();      // reserve vault -> [pool, 'x' | 'y']
+  const watchedCount = new Map(); // coin -> how many of its pools are watched
+  const liveStats = { updates: 0, outs: 0, ins: 0 };
+  const priceIn = side => (priceOf?.(side.mint) || side.px || 0);
+  const usdOf = side => side.amt * priceIn(side);
+  const side = (vault, mint, dec, amt, px) => ({ vault, mint, dec, amt, px, seen: false });
+  // a watched pool's liquidity changed: its row in every coin listing it, and those coins' totals
+  function refreshPool(address) {
+    const w = watched.get(address);
+    if (!w) return;
+    const tvl = usdOf(w.x) + usdOf(w.y);
+    for (const m of w.coins) {
+      const s = cache.get(m)?.summary, p = s?.list.find(q => q.address === address);
+      if (!p) continue;
+      p.tvl = tvl; p.liveAt = w.at;
+      recount(s);
+    }
+  }
+  // a pool that has been still for SETTLE_MS: was that a pull, an add, or trading?
+  function evaluate(address) {
+    const w = watched.get(address);
+    if (!w) return;
+    const b = w.base, px = priceIn(w.x), py = priceIn(w.y);
+    w.base = { x: w.x.amt, y: w.y.amt };
+    const dx = w.x.amt - b.x, dy = w.y.amt - b.y, tol = v => Math.abs(v) * 1e-3;
+    const before = b.x * px + b.y * py, after = w.x.amt * px + w.y.amt * py, delta = after - before;
+    const enough = Math.abs(delta) >= Math.max(MOVE_USD, MOVE_SHARE * Math.max(before, after));
+    const kind = !enough ? null : dx <= tol(b.x) && dy <= tol(b.y) && delta < 0 ? 'out' : dx >= -tol(b.x) && dy >= -tol(b.y) && delta > 0 ? 'in' : null;
+    if (!kind) return;
+    liveStats[kind === 'out' ? 'outs' : 'ins']++;
+    for (const m of w.coins) {
+      const s = cache.get(m)?.summary, p = s?.list.find(q => q.address === address);
+      onLiquidity?.({ mint: m, pool: address, kind, usd: Math.abs(delta), before, after, poolName: p?.name || null, live: s?.live ?? null, pools: s?.pools ?? null });
+    }
+  }
 
   async function read(mint) {
     const all = [];
@@ -72,6 +132,15 @@ export function createDlmm({ fetchJson = defaultFetch, log = () => {}, now = Dat
     const old = cache.get(mint);
     try {
       const s = await read(mint);
+      // a pool watched live keeps its live liquidity (Meteora's figures lag the chain), with Meteora's newer prices
+      for (const p of s.list) {
+        const w = watched.get(p.address);
+        if (!w) continue;
+        if (p.px) w.x.px = p.px;
+        if (p.py) w.y.px = p.py;
+        if (w.x.seen || w.y.seen) { p.tvl = usdOf(w.x) + usdOf(w.y); p.liveAt = w.at; }
+      }
+      recount(s);
       cache.delete(mint); cache.set(mint, { at: now(), summary: s }); // Map order = least recently read first
       stats.reads++;
       const prev = old?.summary;
@@ -98,17 +167,66 @@ export function createDlmm({ fetchJson = defaultFetch, log = () => {}, now = Dat
     tick, // for tests
     // coins someone has open, coins on someone's list, and other coins worth knowing about (each best first)
     want(openMints, mints, more = []) { open = [...new Set(openMints)]; listed = [...new Set(mints)]; background = [...new Set(more)]; },
-    // what a list row carries (null while the coin hasn't been read)
+    // what a list row carries (null while the coin hasn't been read); dlmmWatched: how many of its pools are live-tracked
     row(mint) {
       const s = cache.get(mint)?.summary;
-      return s ? { dlmmPools: s.pools, dlmmLive: s.live, dlmmTvl: s.tvl, dlmmVol24: s.vol24, dlmmNew1h: s.new1h, dlmmNew24: s.new24, dlmmNewest: s.newest } : null;
+      return s ? { dlmmPools: s.pools, dlmmLive: s.live, dlmmTvl: s.tvl, dlmmVol24: s.vol24, dlmmNew1h: s.new1h, dlmmNew24: s.new24, dlmmNewest: s.newest, dlmmWatched: watchedCount.get(mint) || 0 } : null;
+    },
+    // Which pools to watch live: every pool (with known vaults) of the coins someone has open, up to maxOpen, and the
+    // live pools of listed coins in list order, up to maxListed. Returns the reserve vaults to subscribe to, as
+    // { open, listed }. A pool that stays watched keeps its live balances.
+    planWatch(openMints, listedMints, { maxOpen = 30, maxListed = 75 } = {}) {
+      const pick = (mints, max, all, skip) => {
+        const out = [];
+        for (const m of mints) {
+          const c = cache.get(m);
+          if (!c?.summary || c.stale) continue;
+          for (const p of c.summary.list) {
+            if (out.length >= max) return out;
+            if (p.rx && p.ry && p.dx != null && p.dy != null && (all || p.tvl >= LIVE_TVL) && !skip?.has(p.address)) out.push([m, p]);
+          }
+        }
+        return out;
+      };
+      const openPools = pick(openMints, maxOpen, true);
+      const listedPools = pick(listedMints, maxListed, false, new Set(openPools.map(([, p]) => p.address)));
+      const next = new Map();
+      watchedCount.clear();
+      for (const [m, p] of [...openPools, ...listedPools]) {
+        let w = next.get(p.address);
+        if (!w) {
+          w = watched.get(p.address) || { x: side(p.rx, p.mx, p.dx, p.ux, p.px), y: side(p.ry, p.my, p.dy, p.uy, p.py), base: { x: p.ux, y: p.uy }, at: null, timer: null };
+          w.coins = new Set();
+          next.set(p.address, w);
+        }
+        w.coins.add(m);
+        watchedCount.set(m, (watchedCount.get(m) || 0) + 1);
+      }
+      for (const [a, w] of watched) if (!next.has(a)) clearTimeout(w.timer);
+      watched.clear(); byVault.clear();
+      for (const [a, w] of next) { watched.set(a, w); byVault.set(w.x.vault, [a, 'x']); byVault.set(w.y.vault, [a, 'y']); }
+      const vaults = list => [...new Set(list.flatMap(([, p]) => [p.rx, p.ry]))];
+      return { open: vaults(openPools), listed: vaults(listedPools) };
+    },
+    // a watched reserve vault's new balance (raw token units)
+    applyVault(vault, raw) {
+      const hit = byVault.get(vault);
+      if (!hit) return;
+      const w = watched.get(hit[0]), s = w[hit[1]];
+      s.amt = raw / 10 ** s.dec; w.at = now(); liveStats.updates++;
+      if (!s.seen) { s.seen = true; w.base[hit[1]] = s.amt; refreshPool(hit[0]); return; } // a first balance is a baseline, not news
+      refreshPool(hit[0]);
+      clearTimeout(w.timer);
+      w.timer = setTimeout(() => evaluate(hit[0]), SETTLE_MS);
+      w.timer.unref?.();
     },
     // the open coin's pools, most liquid first (null until it has been read in this run)
     report(mint) {
       const c = cache.get(mint);
       if (!c?.summary || c.stale) return null;
       const { list, ...s } = c.summary;
-      return { at: c.at, mint, ...s, liveTvl: LIVE_TVL, list: list.slice(0, LIST_KEEP) };
+      return { at: c.at, mint, ...s, liveTvl: LIVE_TVL, watched: watchedCount.get(mint) || 0,
+        list: list.slice(0, LIST_KEEP).map(({ rx, ry, mx, my, dx, dy, px, py, ux, uy, ...p }) => ({ ...p, watched: watched.has(p.address) })) };
     },
     // snapshot: the counts of the given coins (not their pool lists), shown again straight after a restart and
     // re-read as soon as each coin's turn comes
@@ -118,7 +236,8 @@ export function createDlmm({ fetchJson = defaultFetch, log = () => {}, now = Dat
       for (const [m, at, s] of entries || []) if (m && s && !cache.has(m)) { cache.set(m, { at, summary: { ...s, list: [] }, stale: true }); n++; }
       return n;
     },
-    stats: () => ({ ...stats, cached: cache.size, wanted: open.length + listed.length, background: background.length, pausedUntil: pausedUntil > now() ? pausedUntil : null }),
+    stats: () => ({ ...stats, cached: cache.size, wanted: open.length + listed.length, background: background.length, pausedUntil: pausedUntil > now() ? pausedUntil : null,
+      live: { ...liveStats, pools: watched.size, vaults: byVault.size } }),
     close: () => clearInterval(timer),
   };
 }

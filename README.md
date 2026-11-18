@@ -15,6 +15,8 @@ chain logs. There's no third-party market-data API in between.
   which other coins the same wallets are in.
 - **Meteora DLMM pools**: a DLMM column shows how many Meteora DLMM pools each coin has (live ones / all of them),
   green when one opened in the last 24 hours. The open coin lists its pools with their liquidity, volume and a link to Meteora.
+  The liquidity of the pools of coins on your lists and of the coin you have open is watched live on-chain, so it
+  updates the moment it changes, and the launches feed flags liquidity being pulled from or added to a pool (LP − / LP +).
   A **DLMM list** ranks coins by live pools, the launches feed flags a coin the moment it gains a pool, and a record in
   the side panel compares how coins did afterwards by how many pools they had, so you can see whether more pools
   really goes with better results.

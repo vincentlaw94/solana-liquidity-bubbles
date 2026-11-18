@@ -112,6 +112,7 @@ venue goes quiet, re-check its event layout first.
 | `TRADERS` | on | `0` stops following wallets (see Traders) |
 | `STONKFUN` | on | `0` stops reading Stonk.fun's coin list (see Raydium pools): no Stonk.fun labels before a coin's LaunchLab pool is seen, and no CLMM pools |
 | `DLMM` | on | `0` stops counting each coin's Meteora DLMM pools (see Meteora DLMM pools) |
+| `DLMM_LIVE` | on | `0` reads DLMM pools from Meteora's API only, without watching their liquidity live on-chain |
 | `TRADER_WINDOW_MIN` | `60` | How many minutes of swaps the Traders view and an open coin's traders cover |
 | `WS_ROTATE_MS` | `12000` | How often the websocket feed is replaced before the RPC cuts it (see Staying connected); `0` turns it off |
 
@@ -442,6 +443,24 @@ lists' volumes or prices.
   go to the coin with more pools opened in the last 24 hours, then to the one with more liquidity in them.
 - **New-pool alerts**: when a read finds more pools than the one before, an `event` of kind `dlmm` goes to the
   dashboards (the launches feed shows "+1 DLMM pool · 5 live of 7"). Pools opened while the server was off raise none.
+- **Live liquidity** (`lib/account-watch.js`, `planWatch` / `applyVault` in `lib/dlmm.js`): Meteora's API is read
+  minutes apart and lags the chain, so the pools of the coins people are looking at are also watched on-chain.
+  Every pool of a coin someone has open (up to 15) and the live pools of coins on their lists (up to 30, chosen in
+  list order, re-planned at most every minute) have their two reserve
+  vaults subscribed with `accountSubscribe`, asking only for the 8-byte token amount. A change costs about 300
+  bytes; 60 pools came to about 770 updates a minute and 120 KB per 30s. The public RPC closes a websocket carrying
+  about 100 subscriptions, and closes every connection from an IP when several subscribe in bursts, so they all go on
+  ONE connection, at most 90 (the open coin's pools first, up to 15, then up to 30 listed coins' live pools), sent
+  100ms apart and changed one subscription at a time; a dropped connection resubscribes after a randomised backoff.
+  A pool's liquidity is its two balances at current prices (the server's own, else Meteora's), and the coin's live
+  count and liquidity follow it the moment a balance changes; a later API read doesn't overwrite them with
+  Meteora's older figure. A first balance after subscribing is only a baseline.
+- **Pull and add alerts**: a swap moves one vault up and the other down; liquidity being pulled lowers both, and
+  being added raises both. Once a watched pool has been still for 1.2 seconds, a move where neither side rose
+  (or neither fell) and the value changed by $250 and 15% or more, valued before and after at the same prices so a
+  price move never counts, sends an `event` of kind `dlmmOut` or `dlmmIn` ("−$3.0K pulled from X-SOL · 1 live of
+  2" in the launches feed). Only watched pools raise them: pools of coins nobody is looking at aren't watched.
+  `/api/stats` → `dlmm.live` counts the updates, pulls and adds, and `dlmm.feed` the connection.
 - **The record** (`lib/dlmm-record.js`, `GET /api/dlmm-record`, kept in `data/dlmm-record.json`): does having more
   DLMM pools go with doing better? The first time a coin's pools are read, its market cap and live pool count are
   recorded; from then on its peak, whether it reached 2×, and its market cap now are followed for 14 days. Coins are

@@ -13,6 +13,7 @@
 //      FUNDING=0 to skip tracing launch wallets' funding, BACKFILL=0 to skip rebuilding launches from before the start,
 //      SNAPSHOT=0 to start empty every time instead of restoring data/snapshot.json.gz,
 //      STONKFUN=0 to skip reading Stonk.fun's coin list (lib/stonkfun.js: labels, and its Raydium CLMM pools),
+//      DLMM_LIVE=0 to read DLMM pools from Meteora's API only, without watching their vaults live,
 //      HOLDERS=0 to skip the top-holder scan (lib/holders.js), DLMM=0 to skip counting Meteora DLMM pools (lib/dlmm.js),
 //      TRADERS=0 to skip following wallets (lib/traders.js), TRADER_WINDOW_MIN (60) for how far back it looks,
 //      WS_ROTATE_MS (12000; 0 = off) for how often the public websocket is replaced before it gets cut
@@ -38,6 +39,7 @@ import { createPins } from './lib/pins.js';
 import { createHolderScan } from './lib/holders.js';
 import { createDlmm, rankDlmm } from './lib/dlmm.js';
 import { createStonkfun } from './lib/stonkfun.js';
+import { createAccountWatch } from './lib/account-watch.js';
 import { createDlmmRecord } from './lib/dlmm-record.js';
 import { rankTraction } from './lib/traction.js';
 import { createTraders } from './lib/traders.js';
@@ -161,8 +163,21 @@ const bestRow = mint => latestRows.reduce((b, r) => r.mint === mint && (!b || r.
 // the record behind "do coins with more DLMM pools do better?": each coin's market cap at its first DLMM read,
 // grouped by how many live pools it had, and how it did afterwards (lib/dlmm-record.js). Kept in its own file.
 const dlmmRecord = process.env.DLMM !== '0' ? createDlmmRecord({ file: path.join(DATA_DIR, 'dlmm-record.json'), log }) : null;
+// a coin's USD price for valuing pool balances: a token's own price, else the price of its listed pool
+let mintPrices = null; // built once per ranking tick, on first use
+const priceOfMint = m => prices.get(m) ?? (mintPrices ||= new Map(latestRows.map(r => [r.mint, r.price]))).get(m);
+const shortUsd = v => '$' + (v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : Math.round(v));
 const dlmm = process.env.DLMM !== '0' ? createDlmm({
   log,
+  priceOf: priceOfMint,
+  // liquidity pulled from, or added to, a watched DLMM pool (lib/dlmm.js): straight to the dashboards
+  onLiquidity: ev => {
+    const r = bestRow(ev.mint);
+    if (!r) return;
+    const what = (ev.kind === 'out' ? '−' + shortUsd(ev.usd) + ' pulled from ' : '+' + shortUsd(ev.usd) + ' added to ') + (ev.poolName || 'a DLMM pool');
+    broadcast({ type: 'event', kind: ev.kind === 'out' ? 'dlmmOut' : 'dlmmIn', pool: r.id, venue: r.venue, symbol: r.sym,
+      name: what + ' · ' + ev.live + ' live of ' + ev.pools, dlmmPool: ev.pool, usd: ev.usd, before: ev.before, after: ev.after, live: ev.live, pools: ev.pools, at: Date.now() });
+  },
   onRead: (mint, s, first) => { if (first) dlmmRecord.note(bestRow(mint), s); },
   // a coin gained DLMM pools since its last read: tell the dashboards (the launches feed shows it)
   onNew: ev => {
@@ -172,6 +187,22 @@ const dlmm = process.env.DLMM !== '0' ? createDlmm({
       name: '+' + ev.added + ' DLMM pool' + (ev.added > 1 ? 's' : '') + ' · ' + ev.live + ' live of ' + ev.pools, added: ev.added, pools: ev.pools, live: ev.live, at: Date.now() });
   },
 }) : null;
+// DLMM pools watched live, on one websocket of at most 90 subscriptions (the public RPC closes every connection from
+// an IP when several subscribe at once; lib/account-watch.js): the reserve vaults of the pools of the coins people
+// have open first (up to 15 pools, re-planned the moment someone opens a coin), then the live pools of coins on their
+// lists (up to 30, re-planned at most every minute). Changes are made subscription by subscription.
+const DLMM_LIVE = process.env.DLMM !== '0' && process.env.DLMM_LIVE !== '0';
+const dlmmWatch = DLMM_LIVE ? {
+  feed: createAccountWatch({ url: RPC_WS, max: 90, onAmount: (a, n) => dlmm.applyVault(a, n), onStatus: s => log('DLMM live feed ' + s) }),
+  listedMints: [], listedAt: 0,
+} : null;
+const DLMM_LISTED_EVERY = 60e3;
+function planDlmmWatch(open, listed) {
+  if (!dlmmWatch) return;
+  if (Date.now() - dlmmWatch.listedAt >= DLMM_LISTED_EVERY) { dlmmWatch.listedMints = listed; dlmmWatch.listedAt = Date.now(); }
+  const v = dlmm.planWatch(open, dlmmWatch.listedMints, { maxOpen: 15, maxListed: 30 });
+  dlmmWatch.feed.follow([...v.open, ...v.listed]);
+}
 // who is trading what over the last hour: the Traders view, an open coin's traders and what else they trade
 const traders = process.env.TRADERS !== '0' ? createTraders({ windowMs: (+process.env.TRADER_WINDOW_MIN || 60) * 60e3 }) : null;
 
@@ -503,7 +534,7 @@ function stats() {
     // quote tokens: how many are priced by Jupiter, and how many only from this server's own pools
     quotePrices: prices.counts(),
     bundlerWallets: bundlers.state,
-    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm?.stats() || null,
+    launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm ? { ...dlmm.stats(), feed: dlmmWatch ? dlmmWatch.feed.stats() : null } : null,
     raydium: { launchMints: market.launchMints.size, cpmmIgnored: market.counts.cpmmIgnored, clmmPools: clmmFeed.pools, clmmConnected: clmmFeed.stream?.connected ?? null },
     stonkfun: stonkfun?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
@@ -592,7 +623,7 @@ const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sel
   'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'bs', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
   'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW', 'trG', 'volG', 'net5', 'trac',
-  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest'];
+  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest', 'dlmmWatched'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -694,7 +725,7 @@ setInterval(() => {
   const t0 = performance.now();
   latestRows = market.rows();
   sample(perf.rowsMs, performance.now() - t0);
-  encoded = new Map(); pickCache = new Map(); rowIndex = null;
+  encoded = new Map(); pickCache = new Map(); rowIndex = null; mintPrices = null;
   athWatch.rank(pickShared(ATH_LIST), latestRows);
   // every row has its ATH (lib/market.js); coins the ATH watch follows also carry its drawdown mark
   for (const r of latestRows) { const a = athWatch.get(r.mint); if (a) { if (a.ath > (r.ath || 0)) { r.ath = a.ath; r.athAt = a.athAt; } r.ddAt = a.ddAt; } }
@@ -746,6 +777,7 @@ function refreshBundlePriority() {
     const shown = new Set(ordered.map(r => r.mint));
     const more = latestRows.filter(r => r.genuine && r.liq >= 2000 && !shown.has(r.mint)).sort((a, b) => b.vol60 - a.vol60).slice(0, 600).map(r => r.mint);
     dlmm.want(open, ordered.map(r => r.mint), more);
+    planDlmmWatch(open, ordered.map(r => r.mint));
   }
   backfill?.want([...new Set(ordered.filter(r => r.program === 'pump' || (r.program === 'pumpswap' && r.mint.endsWith('pump'))).map(r => r.mint))]);
 }
