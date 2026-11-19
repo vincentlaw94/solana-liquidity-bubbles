@@ -88,3 +88,17 @@ test('a flood of new wallets cannot grow it without bound', () => {
   assert.equal(tr.stats().dropped, 2);
   assert.equal(tr.wallet('a').buys, 2);
 });
+
+test('coins add up across every wallet, most traded first, bots left out', () => {
+  const { tr, swap } = setup();
+  swap('W1', 'A', 1, 100); swap('W1', 'B', 1, 30);
+  swap('W2', 'A', 0, 50); swap('W2', 'A', 1, 10);
+  swap('W3', 'B', 1, 20);
+  for (let i = 0; i < 160; i++) swap('spam', 'C', 1, 10); // a bot: 1600 of volume that shouldn't lead the list
+  const r = tr.coins();
+  assert.equal(r.total, 2);
+  assert.deepEqual(r.coins.map(c => [c.pool, c.usd, c.buyUsd, c.sellUsd, c.netUsd, c.wallets, c.buyers, c.sellers, c.buys, c.sells]),
+    [['A', 160, 110, 50, 60, 2, 1, 1, 2, 1], ['B', 50, 50, 0, 50, 2, 2, 0, 2, 0]]);
+  assert.deepEqual(tr.coins({ bots: true }).coins.map(c => c.pool), ['C', 'A', 'B']);
+  assert.equal(tr.coins({ limit: 1 }).coins.length, 1);
+});

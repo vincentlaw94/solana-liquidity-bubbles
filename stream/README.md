@@ -114,6 +114,7 @@ venue goes quiet, re-check its event layout first.
 | `DLMM` | on | `0` stops counting each coin's Meteora DLMM pools (see Meteora DLMM pools) |
 | `DLMM_LIVE` | on | `0` reads DLMM pools from Meteora's API only, without watching their liquidity live on-chain |
 | `TRADER_WINDOW_MIN` | `60` | How many minutes of swaps the Traders view and an open coin's traders cover |
+| `ROTATION_GAP_MIN` | `15` | How soon after selling one coin a wallet's buy of another counts as rotating (see Rotation) |
 | `WS_ROTATE_MS` | `12000` | How often the websocket feed is replaced before the RPC cuts it (see Staying connected); `0` turns it off |
 
 Without LaserStream, the free public RPC carries the full log firehose (about 200–350 decoded swaps per second), but it
@@ -159,10 +160,16 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/bundle-wallets?limit=100`: this server's compiled bundler-wallet DB, most launches first
 - `GET /api/traders?sort=usd|net|coins|trades&limit=50&bots=1&minUsd=0`: the most active wallets of the last hour (see
   Traders), each with its volume, what it bought and sold, its swaps, how many coins it traded and its 3 most traded
-  (`top`, each with the `coin` it is). `bots=0` leaves out wallets that trade like bots
+  (`top`, each with the `coin` it is). `bots=0` leaves out wallets that trade like bots. Also `coins` (up to `coins=50`):
+  every wallet's swaps added up per coin, by volume, with `wallets`, `buyers`, `sellers`, buys and sells (same `bots` setting)
 - `GET /api/trader?wallet=<address>`: one wallet's totals and every coin it traded in the window (`coinList`); 404 if it made no swaps
 - `GET /api/pool-traders?id=<pool id>`: a pool's traders in the window: how many, how many bought or sold more, its 12
   biggest (`top`), and the other coins its traders are in (`also`: coins shared by 2+ of its non-bot wallets, most wallets first)
+- `GET /api/rotation?window=<minutes>&bots=1`: money rotating between coins (see Rotation) over the last `window`
+  minutes (default 15, up to the trader window): `pairs` (coin → coin, with `usd`, `wallets`, `rotations`), `into` and
+  `outOf` (coins by net money rotated in / out, each with the coins it came `from` or went `to`) and `recent` rotations
+- `GET /api/coin-rotation?id=<pool id>`: one coin's rotation over the trader window: `inUsd`, `outUsd`, `netUsd`,
+  `walletsIn`, `walletsOut`, and the coins money came `from` and went `to`
 - `GET /api/dlmm?mint=<mint>`: a coin's Meteora DLMM pools (see Meteora DLMM pools): `pools`, `live`, `tvl`, `vol24`,
   `new24`, `newest`, and `list` (its 25 most liquid pools, each with `address`, `tvl`, `vol24`, `binStep`, `created`). 202
   while its first read is waiting
@@ -412,7 +419,7 @@ The server follows every wallet that trades a coin the lists can show, over a ro
 `TRADER_WINDOW_MIN`): what it bought and sold of each coin, in USD. Three things come out of it:
 
 - **Traders view** (dashboard): the most active wallets by volume, net buying, coins traded or swaps, each with the
-  coins it trades most. Click a coin to open it, or a wallet for its card.
+  coins it trades most, beside the most traded coins across all wallets. Click a coin to open it, or a wallet for its card.
 - **Trader card**: one wallet's totals and every coin it traded in the hour. Any wallet opens it: in the Traders
   view, in an open coin's traders, or in its live swaps.
 - **An open coin's traders**: how many wallets traded it, how many bought more than they sold, its biggest traders,
@@ -422,6 +429,23 @@ Wallets that trade like bots are tagged (over 150 swaps in the hour, or 30+ swap
 position), left out of the Traders view unless you tick Show bots, and never counted toward "also in". The hour is
 kept as six 10-minute slices, so totals cover between 50 and 60 minutes; they start empty on every start (wallets
 aren't saved in the snapshot). Up to 250,000 wallets are followed at once.
+
+## Rotation
+
+Where traders are moving money (`lib/rotation.js`). A rotation is a wallet selling coin A and then buying coin B
+within `ROTATION_GAP_MIN` (15 minutes): what the sell raised, up to the buy's size, counts as A → B. A buy spends the
+wallet's newest unspent sells first, and each sell is spent once, so selling A and buying B and C splits A's proceeds
+between them. Buying back the coin it just sold is a re-entry and spends that sell instead. Fresh money (a buy with no
+sell before it) isn't a rotation. Coins are matched by mint, so a coin moving from its bonding curve to its AMM pool
+isn't a rotation. Bot-like wallets (as in Traders) are left out unless you tick Show bots.
+
+- **Rotation view** (dashboard): over the last 5, 15, 30 or 60 minutes, the top coin → coin rotations (by how many
+  wallets made them), the coins money is rotating into and out of (net, with where it came from or went), and the
+  latest rotations with their wallet.
+- **An open coin's rotation**: money rotated in from other coins and out to them, and which coins.
+
+Rotations are kept for the trader window (an hour) and start empty on every start, like Traders. They need the
+trader's wallet, so they don't cover LaunchLab or Raydium CPMM swaps on the public feed.
 
 ## Meteora DLMM pools
 

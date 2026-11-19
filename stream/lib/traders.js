@@ -143,8 +143,37 @@ export function createTraders({ windowMs = 3600e3, slices = 6, maxWallets = 2500
     };
   }
 
+  // every wallet's coins added up: the coins traded most across all wallets, by USD volume. Bots are left out unless
+  // bots is true (they would swamp it with churn). Added up on demand, so a short cache keeps the dashboard's polling cheap.
+  let coinCache = null;
+  function coins({ limit = 50, bots = false } = {}) {
+    roll();
+    const t = now();
+    if (!coinCache || coinCache.bots !== bots || t - coinCache.at > 2000) {
+      const by = new Map();
+      for (const rec of wallets.values()) {
+        if (!bots && isBot(rec)) continue;
+        for (const [pool, c] of rec.coins) {
+          let o = by.get(pool);
+          if (!o) by.set(pool, o = { pool, bu: 0, su: 0, nb: 0, ns: 0, wallets: 0, buyers: 0, sellers: 0, last: 0 });
+          o.bu += c.bu; o.su += c.su; o.nb += c.nb; o.ns += c.ns; o.wallets++;
+          if (c.bu > c.su) o.buyers++; else if (c.su > c.bu) o.sellers++;
+          if (c.last > o.last) o.last = c.last;
+        }
+      }
+      const rows = [...by.values()].sort((a, b) => (b.bu + b.su) - (a.bu + a.su));
+      coinCache = { at: t, bots, total: rows.length, rows };
+    }
+    return {
+      total: coinCache.total,
+      coins: coinCache.rows.slice(0, limit).map(o => ({ pool: o.pool, usd: r2(o.bu + o.su), buyUsd: r2(o.bu), sellUsd: r2(o.su), netUsd: r2(o.bu - o.su),
+        buys: o.nb, sells: o.ns, wallets: o.wallets, buyers: o.buyers, sellers: o.sellers, last: o.last })),
+    };
+  }
+
   return {
-    trade, top, wallet, pool, windowMs,
+    trade, top, wallet, pool, coins, windowMs,
+    isBot: w => { const rec = wallets.get(w); return !!rec && isBot(rec); },
     stats: () => ({ wallets: wallets.size, windowMin: Math.round(windowMs / 60e3), slices: ring.length, ...counts }),
   };
 }

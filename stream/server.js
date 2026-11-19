@@ -16,6 +16,7 @@
 //      DLMM_LIVE=0 to read DLMM pools from Meteora's API only, without watching their vaults live,
 //      HOLDERS=0 to skip the top-holder scan (lib/holders.js), DLMM=0 to skip counting Meteora DLMM pools (lib/dlmm.js),
 //      TRADERS=0 to skip following wallets (lib/traders.js), TRADER_WINDOW_MIN (60) for how far back it looks,
+//      ROTATION_GAP_MIN (15) for how soon after a sell a wallet's buy of another coin counts as rotating (lib/rotation.js),
 //      WS_ROTATE_MS (12000; 0 = off) for how often the public websocket is replaced before it gets cut
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -43,6 +44,7 @@ import { createAccountWatch } from './lib/account-watch.js';
 import { createDlmmRecord } from './lib/dlmm-record.js';
 import { rankTraction } from './lib/traction.js';
 import { createTraders } from './lib/traders.js';
+import { createRotation } from './lib/rotation.js';
 
 const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
 const LASER_ENDPOINT = process.env.LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com';
@@ -205,6 +207,8 @@ function planDlmmWatch(open, listed) {
 }
 // who is trading what over the last hour: the Traders view, an open coin's traders and what else they trade
 const traders = process.env.TRADERS !== '0' ? createTraders({ windowMs: (+process.env.TRADER_WINDOW_MIN || 60) * 60e3 }) : null;
+// where money is rotating: wallets selling one coin and buying another soon after (the Rotation view, an open coin's flows)
+const rotation = traders ? createRotation({ windowMs: traders.windowMs, gapMs: (+process.env.ROTATION_GAP_MIN || 15) * 60e3 }) : null;
 
 // ---- snapshot: restore the last run's state before the feed starts, save it every minute and on shutdown ----
 const snapshot = process.env.SNAPSHOT !== '0' ? createSnapshot({ file: path.join(DATA_DIR, 'snapshot.json.gz'), log }) : null;
@@ -442,8 +446,8 @@ function trendScore(r, now) {
 // "breakout" ranks setups by lib/breakout.js's score, and only coins passing its safety gates
 // "traction" ranks coins gaining traders (lib/traction.js): the last 5 minutes against the 25 before; its score is `trac`
 // "dlmm" ranks coins by how many live Meteora DLMM pools they have (lib/dlmm.js)
-const LISTS = ['trending', 'top', 'both', 'breakout', 'volume', 'traction', 'dlmm'];
-const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume', 'traction', 'dlmm'], MAX_PANELS = 6;
+const LISTS = ['trending', 'top', 'both', 'breakout', 'volume', 'traction', 'dlmm', 'traded'];
+const PANEL_LISTS = ['trending', 'top', 'breakout', 'volume', 'traction', 'dlmm', 'traded'], MAX_PANELS = 6;
 const DEFAULT_PANELS = [{ list: 'trending' }, { list: 'top' }, { list: 'breakout' }];
 // panels as the dashboard sends them ([{ list, window }]) or as a query string ("trending,top,volume:15m")
 function readPanels(v) {
@@ -468,6 +472,18 @@ function rankTrending(eligible, limit, now) {
     .map(r => ({ ...r, score: +trendScore(r, now).toFixed(2) }))
     .sort((a, b) => b.score - a.score).slice(0, limit);
 }
+// "Most traded": coins ranked by what the followed wallets (bots left out) traded in them over the trader window
+// (lib/traders.js), the Traders view's coin totals; each row carries them as `tw`
+function rankTraded(eligible, limit) {
+  if (!traders) return [];
+  const by = new Map(traders.coins({ limit: 5000 }).coins.map(c => [c.pool, c]));
+  const out = [];
+  for (const r of eligible) {
+    const c = by.get(r.id);
+    if (c) out.push({ ...r, tw: { usd: c.usd, net: c.netUsd, wallets: c.wallets, buyers: c.buyers, sellers: c.sellers, buys: c.buys, sells: c.sells } });
+  }
+  return out.sort((a, b) => b.tw.usd - a.tw.usd).slice(0, limit);
+}
 function pick(rows, cfg) {
   const now = Date.now();
   const eligible = rows.filter(r => r.liq >= cfg.minLiq && (!cfg.genuine || r.genuine) && (!cfg.venues || cfg.venues.includes(r.venue)) &&
@@ -478,24 +494,30 @@ function pick(rows, cfg) {
   if (cfg.list === 'trending') return rankTrending(eligible, cfg.limit, now);
   if (cfg.list === 'traction') return rankTraction(eligible, cfg.limit);
   if (cfg.list === 'dlmm') return rankDlmm(eligible, cfg.limit);
+  if (cfg.list === 'traded') return rankTraded(eligible, cfg.limit);
   // Panels: each panel's list (the same list twice, e.g. two Volume panels with one window, is ranked once)
   const ranked = new Map(), out = new Map(), n = cfg.panels.length;
   const rank = p => {
     const k = p.list + ':' + (p.window || '');
     if (!ranked.has(k)) ranked.set(k, p.list === 'top' ? rankTop(eligible, cfg.limit) : p.list === 'breakout' ? rankBreakout(eligible, cfg.limit, now) :
-      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : p.list === 'traction' ? rankTraction(eligible, cfg.limit) : p.list === 'dlmm' ? rankDlmm(eligible, cfg.limit) : rankTrending(eligible, cfg.limit, now));
+      p.list === 'volume' ? rankVolume(eligible, cfg.limit, p.window, now) : p.list === 'traction' ? rankTraction(eligible, cfg.limit) : p.list === 'dlmm' ? rankDlmm(eligible, cfg.limit) : p.list === 'traded' ? rankTraded(eligible, cfg.limit) : rankTrending(eligible, cfg.limit, now));
     return ranked.get(k);
   };
   cfg.panels.forEach((p, i) => rank(p).forEach((r, j) => {
     let o = out.get(r.id);
     // `score` is the trend score: Breakout's own score travels as `setup`
-    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, trac: null, volW: null, vols: null, bs: null, ranks: new Array(n).fill(null) });
+    if (!o) out.set(r.id, o = { ...r, score: null, setup: null, why: null, trac: null, volW: null, vols: null, bs: null, tw: null, ranks: new Array(n).fill(null) });
     o.ranks[i] = j + 1;
     if (p.list === 'trending') o.score = r.score;
     else if (p.list === 'breakout') Object.assign(o, { setup: r.setup, why: r.why });
     else if (p.list === 'traction') o.trac = r.trac;
+    else if (p.list === 'traded') o.tw = r.tw;
     else if (p.list === 'volume') { o.vols = { ...o.vols, [p.window]: r.volW }; o.bs = { ...o.bs, ...r.bs }; }
   }));
+  // a Breakout panel keeps the viewer's pinned coins at its top whatever its filters: send them even when off every list
+  if (cfg.panels.some(p => p.list === 'breakout')) for (const r of pinRows) {
+    if (!out.has(r.id)) out.set(r.id, { ...r, score: null, setup: null, why: null, trac: null, volW: null, vols: null, bs: null, ranks: new Array(n).fill(null) });
+  }
   return [...out.values()];
 }
 function readConfig(m) {
@@ -536,7 +558,7 @@ function stats() {
     bundlerWallets: bundlers.state,
     launchBundles: launchBundles.stats(), holders: holders?.stats() || null, dlmm: dlmm ? { ...dlmm.stats(), feed: dlmmWatch ? dlmmWatch.feed.stats() : null } : null,
     raydium: { launchMints: market.launchMints.size, cpmmIgnored: market.counts.cpmmIgnored, clmmPools: clmmFeed.pools, clmmConnected: clmmFeed.stream?.connected ?? null },
-    stonkfun: stonkfun?.stats() || null, traders: traders?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
+    stonkfun: stonkfun?.stats() || null, traders: traders?.stats() || null, rotation: rotation?.stats() || null, backfill: backfill?.stats() || null, snapshot: snapshot?.stats || null,
     providers: providers(now),
     images: { ...images.stats, ...meta.stats() },
     dbc: { queued: counters.dbcQueued, fetched: counters.dbcFetched, dropped: counters.dbcDropped, missing: counters.dbcMissing, perSecCap: DBC_TX_PER_SEC },
@@ -623,7 +645,7 @@ const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sel
   'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'bs', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
   'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW', 'trG', 'volG', 'net5', 'trac',
-  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest', 'dlmmWatched'];
+  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest', 'dlmmWatched', 'tw'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -662,7 +684,7 @@ function snapshotFor(c, pools, reset) {
 }
 // clients with the same list settings share one ranking per tick
 let pickCache = new Map();
-// pinned coins are added to the Breakout list (whatever its filters) unless they're already on it
+// pinned coins are added to the Breakout list (whatever its filters) unless they're already on it; in Panels, pick() adds them
 function pickShared(cfg, selected) {
   const key = cfg.list + '|' + cfg.limit + '|' + cfg.minLiq + '|' + cfg.genuine + '|' + cfg.maxAge + '|' + (cfg.venues || '') + '|' + (cfg.list === 'volume' ? cfg.window : '') +
     '|' + (cfg.list === 'both' ? cfg.panels.map(p => p.list + ':' + (p.window || '')).join() : '');
@@ -796,7 +818,12 @@ market.onTrade = () => {
     if (!trades.length) return;
     for (const t of trades) { athWatch.trade(t); breakout.trade(t); pins.trade(t); }
     // wallets are followed on the coins the lists can show (PumpSwap's non-launchpad pools would swamp them)
-    if (traders) for (const t of trades) if (rowById(t.p)) traders.trade(t);
+    if (traders) for (const t of trades) {
+      const r = rowById(t.p);
+      if (!r) continue;
+      traders.trade(t);
+      rotation?.trade({ w: t.w, m: r.mint, p: t.p, b: t.b, u: t.u, t: t.t });
+    }
     const now = Date.now();
     for (const t of trades) { sample(lat.push, now - t.t); if (t.ct) sample(lat.chain, t.t - t.ct); }
     // what a list row needs: pool, time, side, USD size, and the pool's price / market cap / liquidity after it
@@ -895,7 +922,10 @@ const server = http.createServer(async (req, res) => {
     const q = url.searchParams, limit = Math.max(1, Math.min(200, +q.get('limit') || 50));
     const list = traders.top({ sort: q.get('sort') || 'usd', limit, bots: q.get('bots') !== '0', minUsd: Math.max(0, +q.get('minUsd') || 0) });
     for (const w of list) w.top = w.top.map(withCoin);
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin: Math.round(traders.windowMs / 60e3), since: started, stats: traders.stats(), traders: list }));
+    // and the coins traded most across all those wallets (same bots setting)
+    const agg = traders.coins({ limit: Math.max(1, Math.min(200, +q.get('coins') || 50)), bots: q.get('bots') !== '0' });
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin: Math.round(traders.windowMs / 60e3), since: started, stats: traders.stats(), traders: list,
+      coins: agg.coins.map(withCoin), coinCount: agg.total }));
   } else if (url.pathname === '/api/trader') {
     // one wallet: every coin it traded in the window, with what it bought and sold of each
     const w = traders?.wallet(url.searchParams.get('wallet') || '');
@@ -907,6 +937,23 @@ const server = http.createServer(async (req, res) => {
     const r = traders.pool(url.searchParams.get('id') || '');
     r.also = r.also.map(withCoin);
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin: Math.round(traders.windowMs / 60e3), since: started, ...r }));
+  } else if (url.pathname === '/api/rotation') {
+    // where money is rotating: coins by net money rotated in / out, the biggest coin → coin flows and the latest
+    // rotations, over the last `window` minutes (up to the trader window); bots=1 keeps bot-like wallets in
+    if (!rotation) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'wallet tracking is off (TRADERS=0)' })); return; }
+    const q = url.searchParams, windowMin = Math.max(1, Math.min(Math.round(rotation.windowMs / 60e3), +q.get('window') || 15));
+    const f = rotation.flows({ windowMs: windowMin * 60e3, bots: q.get('bots') === '1', isBot: traders.isBot });
+    const info = new Map(), coin = (mint, pool) => pool ? (info.get(pool) || info.set(pool, coinInfo(pool)).get(pool)) : { mint, sym: shortAddr(mint), unlisted: true };
+    for (const c of [...f.into, ...f.outOf]) { c.coin = coin(c.mint, c.pool); for (const o of [...c.from, ...c.to]) o.coin = coin(o.mint, o.pool); }
+    for (const p of [...f.pairs, ...f.recent]) { p.fromCoin = coin(p.from, p.fromPool); p.toCoin = coin(p.to, p.toPool); }
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin, maxWindowMin: Math.round(rotation.windowMs / 60e3), gapMin: Math.round(rotation.gapMs / 60e3), since: started, stats: rotation.stats(), ...f }));
+  } else if (url.pathname === '/api/coin-rotation') {
+    // one coin (by pool id): which coins its buyers' money came from, and where its sellers' money went
+    if (!rotation) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'wallet tracking is off (TRADERS=0)' })); return; }
+    const id = url.searchParams.get('id') || '', mint = coinInfo(id).mint;
+    const r = rotation.coin(mint || id, { isBot: traders.isBot });
+    for (const o of [...r.from, ...r.to]) o.coin = o.pool ? coinInfo(o.pool) : { mint: o.mint, sym: shortAddr(o.mint), unlisted: true };
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ at: Date.now(), windowMin: Math.round(rotation.windowMs / 60e3), gapMin: Math.round(rotation.gapMs / 60e3), since: started, ...r }));
   } else if (url.pathname === '/api/clear-volume') {
     // start Top volume over: forget the 1h / 24h volume collected so far. POST only, and only from this machine's
     // own pages (any website can send a request to localhost): the dashboard served from it, or index.html opened

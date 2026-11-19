@@ -3,16 +3,24 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): Trending, Traction, DLMM, Top volume, Breakout, Volume, or Panels (lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list, up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
+- **List view** (default): always Panels, lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list (Trending, Traction, DLMM, Top volume, Most traded, Breakout, Volume), up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕, with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.
 - **Traction list**: coins gaining traders right now. It compares the wallets trading a coin in the last 5 minutes
   with the 25 before, and lists the ones whose crowd is growing while more is bought than sold, with Trader growth
   and Net flow columns.
-- **Traders view**: the most active wallets of the last hour and the coins each is trading. Click a wallet (there, in
+- **Most traded list**: coins ranked by what the followed wallets (bots left out) traded in them over the last hour, with
+  that volume, its net buying and how many wallets bought or sold. Clicking a row on any list opens the coin and copies
+  its contract address. Its columns keep their own order: drag any header, its own columns included, to move it.
+- **Traders view**: the most active wallets of the last hour and the coins each is trading, beside the most traded coins
+  across all those wallets (volume, net buying, how many wallets bought or sold). Click a wallet (there, in
   an open coin's traders, or in its live swaps) for everything it traded; an open coin shows its biggest traders and
   which other coins the same wallets are in.
+- **Rotation view**: where traders are moving money. When a wallet sells one coin and buys another within 15 minutes,
+  that's a rotation. The view ranks the top coin → coin rotations by how many wallets made them, the coins money is
+  rotating into and out of (and where it came from or went), and the latest rotations, over 5m to 1h. An open coin
+  shows which coins its buyers rotated in from and its sellers rotated out to.
 - **Meteora DLMM pools**: a DLMM column shows how many Meteora DLMM pools each coin has (live ones / all of them),
   green when one opened in the last 24 hours. The open coin lists its pools with their liquidity, volume and a link to Meteora.
   The liquidity of the pools of coins on your lists and of the coin you have open is watched live on-chain, so it
@@ -48,16 +56,14 @@ chain logs. There's no third-party market-data API in between.
   real liquidity, $5k–$2M market cap) ranked by a setup score: room to grow, buy pressure, volume pace, traders,
   pool depth and curve progress. It's a screen, not a prediction: the side panel keeps its record for good, how many
   flagged coins went on to 2× (all time and the last 24h).
-- **Pins**: pin coins on the Breakout list to keep them at its top, even after they drop off. Each shows its market
+- **Pins**: pin coins in a Breakout panel to keep them at its top, even after they drop off. Each shows its market
   cap against when you pinned it, and a DEAD badge once it's rugged, down 80% from its peak, or stopped trading.
   The server follows pins with the browser closed, and your browser keeps a copy that restores them.
-- **Coin age filter**: show only coins younger than a chosen age, from 15 seconds to 30 days. Each list keeps its
-  own age. Favourite ages sit as buttons next to All; star more in the dropdown.
 - **Volume list**: coins ranked by their volume over a window you pick: 1m, 15m, 30m, 1h, 4h, 12h or 24h.
 - **Clear volume**: on Top volume, Volume and Panels, a button starts the server's 1h and 24h volume over from now (for
   every dashboard using it); the side panel then shows volume since the clear.
-- **Your settings**: hide coins, copy contract addresses, choose and reorder columns (in the Columns editor, or by dragging a column header onto another), the age filter and its
-  favourites. All of it is saved in your browser.
+- **Your settings**: hide coins, copy contract addresses, choose and reorder columns (in the Columns editor, or by dragging a column header onto another) and
+  your panels. All of it is saved in your browser. Every control sits on one slim line beside the live status.
 
 ## Run it
 
