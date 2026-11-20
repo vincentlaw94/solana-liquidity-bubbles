@@ -121,7 +121,9 @@ export class Market {
   async resolve(p) {
     try {
       p.resolving = true;
-      const a = await this.accounts.get(p.id, p.program === 'pumpswap' || p.program === 'cpmm');
+      // a PumpSwap pool is looked up only once it has traded 10 times, and its lookup is what lists the coin: not
+      // left to fill whatever room other reads leave. CPMM's long tail of non-launchpad pools stays low priority.
+      const a = await this.accounts.get(p.id, p.program === 'cpmm');
       if (!a) throw new Error('pool account missing');
       const b = a.data;
       if (p.program === 'pumpswap') {

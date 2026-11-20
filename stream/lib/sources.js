@@ -15,9 +15,16 @@ export function createRpc(url, { rps = 8, methodRps = 3.5 } = {}) {
   async function call(method, params) {
     const l = lane(method);
     for (let attempt = 0; ; attempt++) {
-      const slot = Math.max(Date.now(), nextSlot, l.next);
-      nextSlot = Math.max(nextSlot, slot + gap);
-      l.next = slot + l.gap;
+      // this method's own pace first: a method the RPC is throttling (getTransaction backs off to one call every
+      // 20s) waits in its own lane...
+      const mine = Math.max(Date.now(), l.next);
+      l.next = mine + l.gap;
+      if (mine > Date.now()) await sleep(mine - Date.now());
+      // ...then the next free slot of the overall rate, taken only once its turn has come. Booked up front, a
+      // queue of slow-lane calls pushed the shared slot minutes or hours ahead and every other method (the pool
+      // lookups too) waited behind it, so new coins stopped being listed the longer the server ran.
+      const slot = Math.max(Date.now(), nextSlot);
+      nextSlot = slot + gap;
       if (slot > Date.now()) await sleep(slot - Date.now());
       stats.calls++;
       let res;
@@ -133,21 +140,28 @@ export function createFailoverRpc({ primary, fallback, primaryMethods = null, da
 
 // Batches account reads into getMultipleAccounts (100 keys per call) and caches results.
 // Low-priority keys only fill whatever room high-priority ones leave in a batch.
-export function createAccountLoader(rpc) {
+// At most `maxInFlight` calls are out at once; keys asked for meanwhile wait and go out together, up to 100 per call.
+// Sending a call every 120ms with whatever had arrived (often one or two keys) queued dozens of near-empty calls
+// behind each other once the RPC throttled getMultipleAccounts (one call every ~13s), and a new pool's lookup
+// waited minutes behind them.
+export function createAccountLoader(rpc, { maxInFlight = 2 } = {}) {
   const cache = new Map(), pending = new Map();
-  let timer = null;
+  let timer = null, inFlight = 0;
+  const schedule = () => { if (!timer && pending.size && inFlight < maxInFlight) timer = setTimeout(flush, 120); };
   function get(key, low = false) {
     if (cache.has(key)) return cache.get(key);
     const p = new Promise((resolve, reject) => pending.set(key, { resolve, reject, low }));
     cache.set(key, p);
-    if (!timer) timer = setTimeout(flush, 120);
+    schedule();
     return p;
   }
   async function flush() {
     timer = null;
+    if (inFlight >= maxInFlight || !pending.size) return;
     const batch = [...pending.entries()].sort((a, b) => a[1].low - b[1].low).slice(0, 100);
     for (const [k] of batch) pending.delete(k);
-    if (pending.size) timer = setTimeout(flush, 120);
+    inFlight++;
+    schedule(); // a second call may go out alongside this one
     try {
       const r = await rpc('getMultipleAccounts', [batch.map(([k]) => k), { encoding: 'base64', commitment: 'confirmed' }]);
       r.value.forEach((v, i) => {
@@ -159,9 +173,12 @@ export function createAccountLoader(rpc) {
       });
     } catch (e) {
       for (const [k, h] of batch) { cache.delete(k); h.reject(e); }
+    } finally {
+      inFlight--;
+      schedule(); // whatever arrived while this call was out goes next, in one call
     }
   }
-  return { get, forget: k => cache.delete(k), size: () => cache.size, backlog: () => pending.size };
+  return { get, forget: k => cache.delete(k), size: () => cache.size, backlog: () => pending.size, inFlight: () => inFlight };
 }
 
 /// Log subscriptions (one logsSubscribe per program) over a websocket that is replaced before it can be cut.

@@ -55,3 +55,29 @@ test('a pool the RPC first missed is looked up on the retry and goes live', asyn
   assert.equal(p.ready, true);
   assert.deepEqual([p.mint, p.quoteMint, p.baseDec, p.quoteDec], [COIN, SOL, 6, 9]);
 });
+
+test('keys asked for while a call is out wait and go out together', async () => {
+  // a slow RPC (300ms per call) and a key asked for every 30ms: a few full-ish calls, not one per 120ms tick
+  const calls = [];
+  const rpc = async (method, [keys]) => { calls.push(keys.length); await wait(300); return { value: keys.map(() => ({ owner: 'x', data: b64(Buffer.alloc(8)) })) }; };
+  const acc = createAccountLoader(rpc, { maxInFlight: 1 });
+  const got = [];
+  for (let i = 0; i < 40; i++) { got.push(acc.get('k' + i)); await wait(30); }
+  const all = await Promise.all(got);
+  assert.equal(all.filter(Boolean).length, 40, 'every key answered');
+  assert.equal(calls.reduce((a, b) => a + b, 0), 40, 'each key asked once');
+  assert.ok(calls.length <= 6, 'batched into a few calls, not ' + calls.length);
+  assert.equal(acc.inFlight(), 0);
+});
+
+test('more than 100 waiting keys go out 100 at a time, high priority first', async () => {
+  const calls = [];
+  const rpc = async (method, [keys]) => { calls.push(keys); await wait(50); return { value: keys.map(() => null) }; };
+  const acc = createAccountLoader(rpc, { maxInFlight: 1 });
+  const got = [];
+  for (let i = 0; i < 150; i++) got.push(acc.get('low' + i, true));
+  got.push(acc.get('pool'));
+  await Promise.all(got);
+  assert.deepEqual(calls.map(c => c.length), [100, 51]);
+  assert.equal(calls[0][0], 'pool', 'the high-priority key went in the first call');
+});
