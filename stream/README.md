@@ -132,6 +132,9 @@ With your own RPC endpoint, raise `RPC_RPS`, `RPC_METHOD_RPS` and `DBC_TX_PER_SE
 - `GET /api/health`: per program, how many pools are seen, resolved and priced
 - `GET /img?u=<image url>`: coin logo proxy (see Coin images)
 - `GET /api/token?mint=<mint>`: every pool the server knows for a coin, and why each is or isn't listed
+- `GET /api/pool?id=<pool address>`: one pool by address, even before it has been looked up (when `/api/token` can't
+  find it yet): `ready`, `resolving`, `failures`, swaps waiting for the lookup (`pending`), seconds since its last swap,
+  and whether it is listed and passes Genuine only. 404 when no swap from it has been seen
 - `GET /api/pools?list=trending|traction|dlmm|top|both|breakout|volume&limit=100&minLiq=0&genuine=true&maxAge=0&window=1h`: a ranked pool list
   (`maxAge`: only coins younger than this many ms, coins of unknown age left out; 0 = any age)
   - `trending`: by momentum score (see below); pools need 8+ swaps in 5 minutes and $500+ liquidity

@@ -164,6 +164,8 @@ export class Market {
       await this.finish(p);
       if (p.program === 'clmm') await this.refreshVaults([p]);
     } catch {
+      // a retry reads the pool again rather than an answer kept from the failed try
+      this.accounts.forget(p.id);
       p.failures = (p.failures || 0) + 1;
       p.resolving = false;
       if (p.failures < 3) setTimeout(() => this.resolve(p), 5000 * p.failures);

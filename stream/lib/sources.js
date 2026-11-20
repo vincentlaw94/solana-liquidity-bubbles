@@ -150,7 +150,13 @@ export function createAccountLoader(rpc) {
     if (pending.size) timer = setTimeout(flush, 120);
     try {
       const r = await rpc('getMultipleAccounts', [batch.map(([k]) => k), { encoding: 'base64', commitment: 'confirmed' }]);
-      r.value.forEach((v, i) => batch[i][1].resolve(v ? { owner: v.owner, data: Buffer.from(v.data[0], 'base64') } : null));
+      r.value.forEach((v, i) => {
+        // "no such account" isn't remembered: the RPC can answer it for an account that exists, when it is behind
+        // (a pool whose first swaps arrived before the node saw it created). Remembered, that pool could never be
+        // looked up again until a restart; forgotten, the next ask goes back to the RPC.
+        if (!v) cache.delete(batch[i][0]);
+        batch[i][1].resolve(v ? { owner: v.owner, data: Buffer.from(v.data[0], 'base64') } : null);
+      });
     } catch (e) {
       for (const [k, h] of batch) { cache.delete(k); h.reject(e); }
     }

@@ -969,6 +969,13 @@ const server = http.createServer(async (req, res) => {
       broadcast({ type: 'stats', stats: stats() });
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ ok: true, pools, at: market.volClearedAt }));
     }
+  } else if (url.pathname === '/api/pool') {
+    // one pool by address, whether or not it has been looked up yet: why a coin isn't listed
+    const p = market.pools.get(url.searchParams.get('id') || '');
+    const out = p ? { id: p.id, program: p.program, ready: !!p.ready, resolving: !!p.resolving, failures: p.failures || 0, ignored: !!p.ignored,
+      pending: p.pending?.length || 0, mint: p.mint || null, quoteMint: p.quoteMint || null, lastEventAgoS: p.lastEventAt ? Math.round((Date.now() - p.lastEventAt) / 1000) : null,
+      listed: !!rowById(p.id), genuine: rowById(p.id)?.genuine ?? null } : null;
+    res.writeHead(out ? 200 : 404, { 'content-type': 'application/json' }).end(JSON.stringify(out || { error: 'no swaps from this pool seen (or forgotten after 10 quiet minutes)' }));
   } else if (url.pathname === '/api/health') {
     // per program: pools seen, resolved (mints + decimals known), priced (quote token has a USD price)
     const h = {};
