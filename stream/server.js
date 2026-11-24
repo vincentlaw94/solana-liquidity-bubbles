@@ -45,6 +45,7 @@ import { createDlmmRecord } from './lib/dlmm-record.js';
 import { rankTraction } from './lib/traction.js';
 import { createTraders } from './lib/traders.js';
 import { createRotation } from './lib/rotation.js';
+import { createHolderHistory } from './lib/holder-history.js';
 
 const LASER_KEY = process.env.LASERSTREAM_API_KEY || process.env.HELIUS_API_KEY || '';
 const LASER_ENDPOINT = process.env.LASERSTREAM_ENDPOINT || 'https://laserstream-mainnet-ewr.helius-rpc.com';
@@ -155,6 +156,9 @@ const athWatch = createAthWatch({
 const breakout = createBreakoutTracker({ file: path.join(DATA_DIR, 'breakout-record.json'), log });
 // coins the viewer pinned: followed by mint until unpinned, with their peak since pinning and whether they look dead
 const pins = createPins({ file: path.join(DATA_DIR, 'pins.json'), log });
+// every coin's holder count over the last day (from Jupiter's index), for the Holders Δ 5m / 1h / 24h columns
+const holderHistory = createHolderHistory();
+setInterval(() => holderHistory.sweep(), 10 * 60e3).unref();
 let pinRows = []; // one row per pin, rebuilt each tick and added to the Breakout list
 // top holders of the coins people are looking at, and any single wallet holding over 3.5% of supply. On the public
 // RPC (one coin at a time), so the Helius budget stays for live account lookups
@@ -221,6 +225,7 @@ if (snap) {
   meta.restore(snap.meta);
   dlmm?.restore(snap.dlmm);
   market.launchRestore(snap.launchMints); // which coins came from a launchpad: their Raydium pools are listed at once
+  holderHistory.restore(snap.holderCounts);
   for (const p of market.pools.values()) if (!meta.get(p.mint)?.icon) meta.request(p.mint);
   log(`snapshot from ${Math.round((Date.now() - snap.at) / 1000)}s ago restored: ${pools} pools, ${launches} launches being followed`);
 }
@@ -232,7 +237,7 @@ function saveSnapshot() {
   const mints = [];
   for (const p of market.pools.values()) if (p.ready) mints.push(p.mint, p.quoteMint);
   snapshot.save({ pools: market.dump(), meta: meta.dump(mints), launches: launchBundles.dump(), ath: athWatch.dump(), volClearedAt: market.volClearedAt || null,
-    dlmm: dlmm?.dump(mints) || null, launchMints: market.launchDump() });
+    dlmm: dlmm?.dump(mints) || null, launchMints: market.launchDump(), holderCounts: holderHistory.dump() });
 }
 setInterval(saveSnapshot, 60e3).unref();
 // Ctrl+C, a closed terminal window, or a kill: save, then exit (the wallet DB, funding cache and Helius usage
@@ -645,7 +650,7 @@ const DYNAMIC = ['liq', 'price', 'mcap', 'vol5', 'vol60', 'vol24', 'buys5', 'sel
   'progress', 'graduated', 'flags', 'genuine', 'score', 'lastTs', 'deployerBundler', 'bundlerLaunches', 'bundlerPnl', 'holders', 'ranks', 'vols', 'bs', 'setup',
   'bundledPct', 'block0Pct', 'bundleHeldPct', 'bundleWallets', 'bundleFunded', 'bundleEst', 'ath', 'athAt', 'ddAt',
   'why', 'flagMcap', 'flagAt', 'peakX', 'hitAt', 'pin', 'gone', 'topHolderPct', 'top10Pct', 'whales', 'volW', 'trG', 'volG', 'net5', 'trac',
-  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest', 'dlmmWatched', 'tw'];
+  'dlmmPools', 'dlmmLive', 'dlmmTvl', 'dlmmVol24', 'dlmmNew1h', 'dlmmNew24', 'dlmmNewest', 'dlmmWatched', 'tw', 'hd5', 'hd60', 'hd24'];
 const r6 = v => +v.toPrecision(6); // 6 significant digits: more than any display shows, far fewer bytes
 function encode(r, keys) {
   const o = { id: r.id };
@@ -762,6 +767,12 @@ setInterval(() => {
     if (h) Object.assign(r, h);
     const d = dlmm?.row(r.mint);
     if (d) Object.assign(r, d);
+    // holders now against 5 minutes, an hour and a day ago, in % (null until a count that old is known)
+    // recorded as of when Jupiter gave the count, so a count restored from the snapshot isn't taken for a new one
+    if (r.holders != null && r.holdersAt) {
+      holderHistory.record(r.mint, r.holders, r.holdersAt);
+      r.hd5 = holderHistory.change(r.mint, 5 * 60e3); r.hd60 = holderHistory.change(r.mint, 3600e3); r.hd24 = holderHistory.change(r.mint, 24 * 3600e3);
+    }
   }
   for (const c of clients) pushPools(c, false);
   sample(perf.tickMs, performance.now() - t0);

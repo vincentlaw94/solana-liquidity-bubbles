@@ -478,6 +478,7 @@ export class Market {
         bundledPct: lb?.bundledPct ?? null, block0Pct: lb?.block0Pct ?? null, bundleHeldPct: lb?.heldPct ?? null,
         bundleWallets: lb?.bundleWallets ?? null, bundleFunded: lb?.fundedTogether ?? null, bundleEst: lb ? lb.est : null,
         holders: tok.holders ?? null, // from Jupiter's token index, refreshed every minute for listed coins
+        holdersAt: tok.holdersAt ?? null, // when Jupiter gave that count (not sent to the dashboard)
         links: tok.links || null, // { x, web, tg } set by the coin's creator in its metadata (unverified)
         vol5: vol5 * qUsd, vol60: vol60 * qUsd, vol24: vol24 * qUsd, buys5: flip ? sells : buys, sells5: flip ? buys : sells,
         traders5: wallets.size, // unique wallets; Pump.fun, PumpSwap and DBC name the trader, LaunchLab logs do not

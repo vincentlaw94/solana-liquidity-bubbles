@@ -378,7 +378,9 @@ export function createTokenMeta({ metadata, onchain } = {}) {
         const born = Date.parse(t.firstPool?.createdAt || t.createdAt || '');
         merge(t.id, { symbol: t.symbol || cur.symbol, name: t.name || cur.name, icon: t.icon || cur.icon || null,
           launchpad: t.launchpad || cur.launchpad || null, decimals: t.decimals, born: born || cur.born || null,
-          holders: Number.isFinite(t.holderCount) ? t.holderCount : cur.holders ?? null });
+          holders: Number.isFinite(t.holderCount) ? t.holderCount : cur.holders ?? null,
+          // when Jupiter said so: a count restored from the snapshot is hours old, not news (lib/holder-history.js)
+          holdersAt: Number.isFinite(t.holderCount) ? Date.now() : cur.holdersAt ?? null });
       }
       for (const id of ids) if (!meta.get(id)?.icon) fromUri(id);
     } catch { ids.forEach(id => (wasHot.has(id) ? hot : queue).add(id)); } // a failed batch keeps its place

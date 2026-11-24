@@ -3,7 +3,7 @@
 A live dashboard of Solana launchpad trading, fed by a self-hosted stream that decodes swaps straight from
 chain logs. There's no third-party market-data API in between.
 
-- **List view** (default): always Panels, lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list (Trending, Traction, DLMM, Top volume, Most traded, Breakout, Volume), up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕, with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
+- **List view** (default): always Panels, lists side by side: Trending, Top volume and Breakout to start, and **+ Add panel** adds any list (Trending, Traction, DLMM, Top volume, Most traded, Breakout, Volume), up to 6, including Volume panels each with their own window; panes can be resized by dragging the lines between them, collapsed by clicking their title or removed with ✕; a bell in a panel's title plays a chime when a coin reaches that list's top 3 for the first time (sound starts after your first click on the page, as browsers require), with columns you can resize by dragging their right edge (all saved in this browser), with market cap, age, liquidity, price
   changes, volume, buys/sells and bonding-curve progress. Every value updates on each swap.
 - **Map view**: a bubble map where each bubble is a pool and its size is liquidity, with a ripple for
   every swap.
@@ -45,6 +45,9 @@ chain logs. There's no third-party market-data API in between.
   holder column shows the biggest single wallet's share of supply, and a red person icon flags a coin where any one
   wallet holds over 3.5%. Bonding curves, AMM pools and other program accounts don't count. The pool panel lists the
   top holders, marking the dev's wallet.
+- **Holder growth**: Holders Δ 5m, Δ 1h and Δ 24h columns show how a coin's holder count (Jupiter's, read about every
+  minute) changed over that time, green for gains and red for losses. The server keeps a day of counts per coin and
+  saves them with its snapshot; a column shows – until it has a count from that long ago.
 - **Links**: each coin shows the X, website and Telegram links its creator set (unverified), an Axiom button,
   and a red flag when its launch was 20% bundled or more.
 - **ATH**: every coin has its all-time-high market cap (the highest this server has seen, on any of its pools), with

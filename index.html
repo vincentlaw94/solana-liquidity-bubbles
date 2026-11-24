@@ -292,6 +292,12 @@ table.bw td.hot { color: var(--sell); font-weight: 600; }
 #infoPop .all { margin: 8px 0 0; padding-top: 7px; border-top: 1px solid var(--line); color: var(--muted); }
 .pane-close { all: unset; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 12px; }
 .pane-close:hover, .pane-close:focus-visible { color: var(--fg); background: var(--raise); }
+.pane-alert { all: unset; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); cursor: pointer; }
+.pane-alert svg { width: 14px; height: 14px; }
+.pane-alert:hover, .pane-alert:focus-visible { color: var(--fg); background: var(--raise); }
+.pane-alert[aria-pressed="true"] { color: var(--accent); }
+@keyframes pane-ping { from { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); } to { background: var(--panel); } }
+.pane-title.pinged { animation: pane-ping 1.6s ease-out; }
 .pane-close:disabled { opacity: .35; cursor: default; background: none; }
 /* reordering panels: drag a title onto another panel (or Alt + arrow on a focused title) */
 .list-pane:not(.collapsed) .pane-title[draggable="true"] { cursor: grab; }
@@ -450,7 +456,8 @@ table.bw .cchip { max-width: 96px; vertical-align: middle; }
 @media (max-width: 900px) {
   body { grid-template-rows: auto auto; height: auto; }
   main { grid-template-columns: 1fr; }
-  #stage { height: 70vh; min-height: 420px; }
+  /* the lists (or map) fill the whole screen below the header; the side panel follows underneath, a scroll away */
+  #stage { height: calc(100dvh - var(--hdr-h, 0px)); min-height: 420px; }
   aside { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
   input[type="search"] { width: 120px; }
 }
@@ -506,7 +513,6 @@ table.bw .cchip { max-width: 96px; vertical-align: middle; }
       <button type="button" data-v="1" aria-pressed="true">By venue</button>
     </div>
     <button type="button" class="btn" id="hiddenBtn" hidden></button>
-    <button type="button" class="btn" id="colBtn" aria-expanded="false" aria-controls="colPanel" hidden>Columns</button>
     <button type="button" class="btn" id="clearVolBtn" hidden>Clear volume</button>
     <label class="ctl check" for="genuine" title="Hide pools with rug, wash-trading or honeypot red flags"><input type="checkbox" id="genuine" checked> Genuine only</label>
     <label class="ctl" for="q">Find <input type="search" id="q" placeholder="token or pair" autocomplete="off"></label>
@@ -775,6 +781,8 @@ function fromStream(r, i) {
     mint: r.mint,
     deployer: r.deployer || null,
     holders: r.holders ?? null,
+    // holders now against 5 minutes / an hour / a day ago, in % (null until the server has a count that old)
+    hd5: r.hd5 ?? null, hd60: r.hd60 ?? null, hd24: r.hd24 ?? null,
     // Meteora DLMM pools (null until read): all of them, those with real liquidity, their liquidity and 24h volume
     // together, how many opened in the last 24h, and when the newest did
     dlmmPools: r.dlmmPools ?? null, dlmmLive: r.dlmmLive || 0, dlmmTvl: r.dlmmTvl || 0, dlmmVol24: r.dlmmVol24 || 0, dlmmNew1h: r.dlmmNew1h || 0, dlmmNew24: r.dlmmNew24 || 0, dlmmNewest: r.dlmmNewest || null,
@@ -863,7 +871,7 @@ function streamConnect() {
     if (m.type === 'pools') {
       if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
       const rows = applySnapshot(m);
-      if (rows.length) { ingestRecords(rows.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); }
+      if (rows.length) { ingestRecords(rows.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); checkTopAlerts(); }
       // a coin opened from a trader's list that wasn't on this list: the server has now added it
       if (pendingOpen && byId.has(pendingOpen)) { const n = byId.get(pendingOpen); pendingOpen = null; select(n); }
       // the open coin moved pools (bonding curve -> AMM after graduation): follow it
@@ -1818,6 +1826,15 @@ function tickCell(td, v, text) {
   setT(td, text);
   setC(td, now < (td._until || 0) ? td._dir : '');
 }
+// a coin's holders now against `win` ago, in %: green when it gained holders, red when it lost them
+const holderChangeCol = (label, k, win, ago) => ({ label, sort: n => n[k] ?? -Infinity,
+  set: (td, n) => {
+    const v = n[k];
+    setT(td, v == null ? '–' : pct(v)); setC(td, v == null ? '' : cls(v));
+    const t = 'Change in holders over the last ' + win + ' (Jupiter’s holder count, read about every minute)' +
+      (v == null ? ': not known yet, the server needs a count from ' + ago : n.holders != null ? '; ' + n.holders.toLocaleString() + ' holders now' : '');
+    if (td.title !== t) td.title = t;
+  } });
 const changeCol = (label, k) => ({ label, sort: n => n.chg[k], set: (td, n) => { setT(td, pct(n.chg[k])); setC(td, cls(n.chg[k])); } });
 // cells with a value and a small bar under it
 const initBar = color => td => { td.innerHTML = barCell(color); td._span = td.querySelector('span'); td._mini = td.querySelector('.mini'); td._bar = td._mini.firstElementChild; };
@@ -1878,6 +1895,9 @@ const COLUMNS = {
   m5: changeCol('Δ 5m', 'm5'),
   h1: changeCol('Δ 1h', 'h1'),
   h24: changeCol('Δ 24h', 'h24'),
+  hd5: holderChangeCol('Holders Δ 5m', 'hd5', '5 minutes', '5 minutes ago'),
+  hd60: holderChangeCol('Holders Δ 1h', 'hd60', 'hour', 'an hour ago'),
+  hd24: holderChangeCol('Holders Δ 24h', 'hd24', '24 hours', 'a day ago'),
   vol5: { label: 'Vol 5m', sort: n => n.vol5, set: (td, n) => { setT(td, usd(n.vol5)); } },
   vol1: { label: 'Vol 1h', sort: n => n.vol1, set: (td, n) => { setT(td, usd(n.vol1)); } },
   vol24: { label: 'Vol 24h', sort: n => n.vol24, set: (td, n) => { setT(td, usd(n.vol24)); } },
@@ -2021,7 +2041,7 @@ const COLUMNS = {
       if (td._born !== n.born) { td._born = n.born; td.title = n.born ? 'Created ' + new Date(n.born).toLocaleString() : 'Creation time not known yet'; }
     } },
 };
-const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'dlmm', 'topHolder', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
+const DEFAULT_COLUMNS = ['rank', 'token', 'mcap', 'coinAge', 'holders', 'hd5', 'hd60', 'hd24', 'dlmm', 'topHolder', 'bundled', 'venue', 'liq', 'price', 'm5', 'h1', 'vol5', 'tx', 'progress'];
 function normalizeColumns(saved) {
   const out = [], seen = new Set();
   for (const c of Array.isArray(saved) ? saved : []) {
@@ -2140,7 +2160,7 @@ for (const t of ['scroll', 'dragstart', 'pointerdown']) document.addEventListene
 function cleanPanels(v) {
   if (!Array.isArray(v)) return null;
   const out = v.filter(c => c && Object.hasOwn(PANEL_LISTS, c.list)).slice(0, MAX_PANELS)
-    .map(c => c.list === 'volume' ? { list: 'volume', window: VOL_WINDOWS.includes(c.window) ? c.window : '1h' } : { list: c.list });
+    .map(c => ({ ...(c.list === 'volume' ? { list: 'volume', window: VOL_WINDOWS.includes(c.window) ? c.window : '1h' } : { list: c.list }), ...(c.alert ? { alert: true } : {}) }));
   return out.length ? out : null;
 }
 let panes = [], splits = [];
@@ -2158,7 +2178,7 @@ function makePane() {
   p.toggle.addEventListener('click', () => { if (state.list === 'both') togglePane(p.i); });
   // a Volume panel's window (its dropdown), and removing a panel
   p.tools.addEventListener('change', e => { if (e.target.matches('.pane-win')) setPanelWindow(p.i, e.target.value); });
-  p.tools.addEventListener('click', e => { if (e.target.closest('[data-close]')) removePanel(p.i); });
+  p.tools.addEventListener('click', e => { if (e.target.closest('[data-close]')) removePanel(p.i); else if (e.target.closest('[data-alert]')) togglePanelAlert(p.i); });
   // from the keyboard: Alt + arrow on a panel's title moves it
   p.toggle.addEventListener('keydown', e => {
     const d = e.altKey && ({ ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 })[e.key];
@@ -2251,6 +2271,8 @@ function setupPanes() {
     p.title.draggable = state.panels.length > 1; // the grab cursor shows it can be dragged: no tooltip
     setH(p.tools, infoHtml(c) + (c.list === 'volume' ? '<select class="pane-win" aria-label="Volume panel window" title="Change this panel’s window">' +
       VOL_WINDOWS.map(w => '<option value="' + w + '"' + (w === c.window ? ' selected' : '') + '>' + w + '</option>').join('') + '</select>' : '') +
+      '<button type="button" class="pane-alert" data-alert aria-pressed="' + !!c.alert + '" aria-label="Sound alert for the ' + esc(panelLabel(c)) + ' panel" title="' +
+        (c.alert ? 'Sound alert on: a chime when a coin reaches this list’s top 3 for the first time. Click to turn it off' : 'Sound alert: a chime when a coin reaches this list’s top 3 for the first time') + '">' + (c.alert ? ICON_BELL_ON : ICON_BELL) + '</button>' +
       '<button type="button" class="pane-close" data-close aria-label="Remove the ' + esc(panelLabel(c)) + ' panel" title="Remove this panel"' + (state.panels.length < 2 ? ' disabled' : '') + '>✕</button>');
   });
   applyPaneSizes();
@@ -2286,6 +2308,60 @@ function setPanelWindow(i, w) {
   const c = state.panels[i];
   if (!c || c.window === w) return;
   c.window = w; panelsChanged();
+}
+// ---------- top-3 sound alert (per panel) ----------
+// A panel with its bell on chimes when a coin reaches the top 3 of that panel's list (the list's own ranking, not a
+// column sort) for the first time. What was already in the top 3 when the bell was turned on, or when the page
+// loaded, doesn't chime. "First time" is per panel and lasts while the page is open (a reload starts over).
+const ICON_BELL = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 11.5V7.5a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14.5a1.6 1.6 0 0 0 3 0"/></svg>';
+const ICON_BELL_ON = ICON_BELL.replace('fill="none"', 'fill="currentColor"');
+const topSeen = new WeakMap(); // panel config -> { key (list + window), mints seen in its top 3 }
+let audioCtx = null, lastChime = 0;
+function unlockAudio() { // browsers only let a page make sound after a click: the bell's click opens the audio
+  try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); } catch {}
+}
+function chime() {
+  const now = Date.now();
+  if (!audioCtx || now - lastChime < 1200) return; // several coins at once: one chime
+  lastChime = now;
+  const t = audioCtx.currentTime;
+  [[880, 0], [1318.5, 0.13]].forEach(([f, d]) => { // two rising notes
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t + d); g.gain.exponentialRampToValueAtTime(0.25, t + d + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.35);
+    o.connect(g).connect(audioCtx.destination); o.start(t + d); o.stop(t + d + 0.4);
+  });
+}
+// after a reload with a bell already on, the first click or key press anywhere opens the audio
+for (const t of ['pointerdown', 'keydown']) document.addEventListener(t, () => { if (!audioCtx && state.panels.some(c => c.alert)) unlockAudio(); }, true);
+function togglePanelAlert(i) {
+  const c = state.panels[i];
+  if (!c) return;
+  c.alert = !c.alert;
+  if (c.alert) { unlockAudio(); topSeen.delete(c); checkTopAlerts(); } // what is in the top 3 now counts as seen
+  setupPanes(); saveSettings();
+}
+// after each list update: chime for coins new to a belled panel's top 3
+function checkTopAlerts() {
+  if (state.list !== 'both') return;
+  let fresh = [];
+  panes.forEach((p, i) => {
+    const c = state.panels[i];
+    if (!c?.alert) return;
+    const key = c.list + ':' + (c.window || '');
+    let s = topSeen.get(c);
+    const first = !s || s.key !== key;
+    if (first) topSeen.set(c, s = { key, mints: new Set() });
+    for (const n of nodes) {
+      const r = p.rank(n);
+      if (r == null || r > 3 || !n.mint || n.dying || !visible(n) || s.mints.has(n.mint)) continue;
+      s.mints.add(n.mint);
+      if (!first) fresh.push([p, n]);
+    }
+  });
+  if (!fresh.length) return;
+  chime();
+  for (const [p] of fresh) { p.title.classList.remove('pinged'); void p.title.offsetWidth; p.title.classList.add('pinged'); }
 }
 // "+ Add panel" (Panels only): a list, or Volume over a window
 $('panelMenu').innerHTML = ['trending', 'traction', 'dlmm', 'top', 'traded', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
@@ -2371,7 +2447,7 @@ function renderHead() {
     const c = COLUMNS[k], s = sortOf(p);
     const sort = s.key === k ? ' aria-sort="' + (s.dir > 0 ? 'ascending' : 'descending') + '"' : '';
     // short headers (Vol, B/S) name their window in their tooltip
-    const drag = movableCol(k, p) ? ' draggable="true" title="Drag to move this column"' : c.tip ? ' title="' + esc(c.tip(p)) + '"' : '';
+    const drag = movableCol(k, p) ? ' draggable="true" title="Drag to move this column · right-click to show or hide columns"' : ' title="' + esc((c.tip ? c.tip(p) + '\n' : '') + 'Right-click to show or hide columns') + '"';
     return '<th class="' + (c.align || '') + '" data-k="' + k + '"' + sort + drag + '><button type="button">' + esc(c.head ? c.head(p) : c.label) + '</button>' +
       '<span class="col-resize" title="Drag to resize; double-click to fit all columns again" aria-hidden="true"></span></th>';
   }).join('');
@@ -2394,6 +2470,8 @@ function applyColWidths(p) {
 }
 // a table header: drag a column's edge to resize it, click a column to sort by it
 function wireHead(p) {
+  // right-click a header: the column editor, to show or hide columns (there is no Columns button)
+  p.head.addEventListener('contextmenu', e => { if (!e.target.closest('th')) return; e.preventDefault(); openColPanel(true); });
   // drag a header onto another to move its column there (in every list); the resize grip and sort click still work
   const clearDrop = () => { for (const q of panes) for (const th of q.head.children) th.classList.remove('drop-before', 'drop-after'); };
   p.head.addEventListener('pointerdown', e => { p.gripDown = !!e.target.closest('.col-resize'); }, true);
@@ -2551,11 +2629,9 @@ function moveColumn(k, to) {
 }
 function openColPanel(open) {
   $('colPanel').hidden = !open;
-  $('colBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) { renderColPanel(); $('colList').querySelector('input:not(:disabled)')?.focus(); }
 }
-$('colBtn').addEventListener('click', () => openColPanel($('colPanel').hidden));
-$('colDone').addEventListener('click', () => { openColPanel(false); $('colBtn').focus(); });
+$('colDone').addEventListener('click', () => openColPanel(false));
 $('colReset').addEventListener('click', () => { state.columns = normalizeColumns(null); state.colWidths = {}; state.listOrder = {}; columnsChanged(); });
 $('colList').addEventListener('change', e => {
   const k = e.target.closest('li')?.dataset.k, c = state.columns.find(c => c.key === k);
@@ -2590,7 +2666,7 @@ $('colList').addEventListener('drop', e => {
 });
 $('colList').addEventListener('dragend', () => { dragKey = null; for (const x of $('colList').children) x.classList.remove('dragging', 'drop-before', 'drop-after'); });
 document.addEventListener('click', e => {
-  if (!$('colPanel').hidden && !e.target.closest('#colPanel') && !e.target.closest('#colBtn')) openColPanel(false);
+  if (!$('colPanel').hidden && !e.target.closest('#colPanel')) openColPanel(false);
 });
 
 // ---------- saved settings (this browser only) ----------
@@ -2604,9 +2680,20 @@ function saveSettings() {
     }));
   } catch {}
 }
+// What a browser with nothing saved starts with: lists only (no side panel), Trending / Volume 15m (with its top-3
+// bell on) / Most traded as panels. Read through the same checks as saved settings, so nothing here can break them.
+const DEFAULT_SETTINGS = {
+  view: 'list', volWindow: '1h', panel: false, colorBy: 'm5', size: 'log', group: true, genuine: true,
+  panels: [{ list: 'trending' }, { list: 'volume', window: '15m', alert: true }, { list: 'traded' }],
+  paneCollapsed: [false, false, false],
+  paneSizes: [0.25795689363431556, 0.48629817561672245, 0.255744930748962],
+  sorts: { volume: { key: 'rank', dir: 1 } },
+  colWidths: { rank: 46, token: 203, mcap: 97, coinAge: 49, holders: 75, hd5: 111, dlmm: 99, hd60: 111, hd24: 118 },
+};
 function restoreSettings() {
-  let s = {};
-  try { s = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {}; } catch {}
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(SETTINGS_KEY)); } catch {}
+  if (!s || typeof s !== 'object') s = DEFAULT_SETTINGS; // nothing saved yet: the defaults above
   const oneOf = (v, ok, d) => ok.includes(v) ? v : d;
   state.view = oneOf(s.view, ['map', 'list', 'traders', 'rotation'], state.view);
   state.volWindow = oneOf(s.volWindow, VOL_WINDOWS, state.volWindow);
@@ -2889,7 +2976,6 @@ function renderClearVol() {
     (t ? '\nLast cleared at ' + clock(t) + '; volumes count from then' : '');
 }
 $('clearVolBtn').addEventListener('click', async () => {
-  if (!confirm('Clear the volume the server has collected?\n\nTop volume, 1h and 24h volume and the 1h / 24h price changes start over from now, for every dashboard using this server. This can’t be undone.')) return;
   const b = $('clearVolBtn');
   b.disabled = true;
   const server = IMG_BASE || location.origin;
@@ -2899,8 +2985,8 @@ $('clearVolBtn').addEventListener('click', async () => {
     catch { throw new Error('can’t reach the stream server at ' + server + '. Is it running, and is this page allowed to connect to it?'); }
     if (!r.ok) throw new Error('the server said: ' + (await r.text() || r.status));
     setT(b, 'Cleared');
-  } catch (e) { setT(b, 'Clear failed'); alert('Volume not cleared: ' + e.message); }
-  setTimeout(() => { b.disabled = false; setT(b, 'Clear volume'); renderClearVol(); }, 2000);
+  } catch (e) { setT(b, 'Clear failed'); b.title = 'Volume not cleared: ' + e.message; } // no popup: the button says so
+  setTimeout(() => { b.disabled = false; setT(b, 'Clear volume'); b.title = ''; renderClearVol(); }, 2000);
 });
 
 // ---------- controls ----------
@@ -2935,7 +3021,6 @@ function setView(v) {
   // map-only controls: colour, layout and size have no effect on the tables
   $('listView').hidden = !list; $('tradersView').hidden = !traders; $('rotationView').hidden = !rotation; cv.hidden = !map; $('legend').hidden = !map; $('groupSeg').hidden = !map;
   $('sizeMode').closest('label').hidden = !map; $('colorBy').closest('label').hidden = !map;
-  $('colBtn').hidden = !list;
   if (!list) openColPanel(false);
   tip.hidden = true;
   if (map) { layoutClusters(); sim.nodes(nodes); sim.alpha(0.6); startFrames(); }
@@ -2968,10 +3053,12 @@ $('colorBy').addEventListener('change', e => { state.colorBy = e.target.value; r
 $('q').addEventListener('input', e => { state.query = e.target.value.trim(); });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
-  if (!$('colPanel').hidden) { openColPanel(false); $('colBtn').focus(); } else select(null);
+  if (!$('colPanel').hidden) openColPanel(false); else select(null);
 });
 
 // ---------- boot ----------
+// the header's height (it wraps onto more lines on narrow screens), so the stacked layout can give the rest to the lists
+new ResizeObserver(() => document.documentElement.style.setProperty('--hdr-h', document.querySelector('header').offsetHeight + 'px')).observe(document.querySelector('header'));
 restoreSettings(); syncControls(); setPanel(state.panel); setupPanes(); renderHead(); renderHiddenBtn(); setView(state.view);
 resize(); applyListUi();
 startFrames();
