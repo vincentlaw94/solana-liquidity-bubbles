@@ -298,6 +298,12 @@ table.bw td.hot { color: var(--sell); font-weight: 600; }
 .pane-alert[aria-pressed="true"] { color: var(--accent); }
 @keyframes pane-ping { from { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); } to { background: var(--panel); } }
 .pane-title.pinged { animation: pane-ping 1.6s ease-out; }
+/* a belled panel's # cell: how the coin just moved (▲ up, ▼ down, new) */
+/* a coin that just entered a belled panel's top 3 */
+table.pools tbody tr.top-new > td { background: rgba(250, 204, 21, .22); }
+table.pools tbody tr.top-new > td:first-child { box-shadow: inset 3px 0 0 #facc15; }
+.rk-mv { margin-left: 4px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.rk-mv.up { color: var(--buy); } .rk-mv.down { color: var(--sell); } .rk-mv.new { color: var(--accent); }
 .pane-close:disabled { opacity: .35; cursor: default; background: none; }
 /* reordering panels: drag a title onto another panel (or Alt + arrow on a focused title) */
 .list-pane:not(.collapsed) .pane-title[draggable="true"] { cursor: grab; }
@@ -871,7 +877,7 @@ function streamConnect() {
     if (m.type === 'pools') {
       if (m.list && m.list !== state.list) return; // a reply to the list we just switched away from
       const rows = applySnapshot(m);
-      if (rows.length) { ingestRecords(rows.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); checkTopAlerts(); }
+      if (rows.length) { ingestRecords(rows.map((r, i) => fromStream(r, i))); state.lastUpdate = Date.now(); trackRankMoves(); checkTopAlerts(); }
       // a coin opened from a trader's list that wasn't on this list: the server has now added it
       if (pendingOpen && byId.has(pendingOpen)) { const n = byId.get(pendingOpen); pendingOpen = null; select(n); }
       // the open coin moved pools (bonding curve -> AMM after graduation): follow it
@@ -1840,7 +1846,16 @@ const changeCol = (label, k) => ({ label, sort: n => n.chg[k], set: (td, n) => {
 const initBar = color => td => { td.innerHTML = barCell(color); td._span = td.querySelector('span'); td._mini = td.querySelector('.mini'); td._bar = td._mini.firstElementChild; };
 const COLUMNS = {
   // position in the list as ranked by the server (trend score or 24h volume); each pane says which rank it shows
-  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => { setT(td, String(ctx.rank(n) ?? '–')); } },
+  rank: { label: '#', sort: n => n.rank ?? Infinity, set: (td, n, ctx) => {
+    const r = ctx.rank(n) ?? '–', mv = rankMove(ctx.pane, n);
+    const key = r + '|' + (mv ? mv.d : '');
+    if (td._rk === key) return;
+    td._rk = key;
+    if (!mv) { td.textContent = String(r); td.title = ''; return; }
+    const isNew = mv.d === 'new', up = !isNew && mv.d > 0;
+    td.innerHTML = r + '<span class="rk-mv ' + (isNew ? 'new' : up ? 'up' : 'down') + '">' + (isNew ? 'new' : (up ? '▲' : '▼') + Math.abs(mv.d)) + '</span>';
+    td.title = isNew ? 'Just joined this list' : 'Moved ' + (up ? 'up ' : 'down ') + Math.abs(mv.d) + ' place' + (Math.abs(mv.d) === 1 ? '' : 's') + ' (shown for a minute after a move)';
+  } },
   token: { label: 'Token', align: 'l', locked: true, sort: n => (n.sym || '').toLowerCase(),
     init: td => {
       td.innerHTML = '<div class="tok"><span class="lg"></span><span><b></b> <small></small></span><span class="rf" hidden>' + ICON_RED_FLAG + '</span><span class="hb" hidden>' + ICON_BUNDLE + '</span><span class="wh" hidden>' + ICON_WHALE + '</span><span class="warn-mark" hidden>⚠</span><span class="dead-badge" hidden>DEAD</span><span class="links-slot"></span><span class="axiom-slot"></span><span class="ca-slot"></span><span class="pin-slot"></span><span class="hide-slot"></span></div>';
@@ -2310,12 +2325,14 @@ function setPanelWindow(i, w) {
   c.window = w; panelsChanged();
 }
 // ---------- top-3 sound alert (per panel) ----------
-// A panel with its bell on chimes when a coin reaches the top 3 of that panel's list (the list's own ranking, not a
-// column sort) for the first time. What was already in the top 3 when the bell was turned on, or when the page
-// loaded, doesn't chime. "First time" is per panel and lasts while the page is open (a reload starts over).
+// A panel with its bell on chimes when a coin enters the top 3 of that panel's list (the list's own ranking, not a
+// column sort), taking another's place, and its row turns yellow for 14 seconds. The top 3 when the bell is turned
+// on (or the page loads) is the starting point. A coin that just entered doesn't chime again for a minute, so one
+// flickering between 3rd and 4th isn't an alert every second.
 const ICON_BELL = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 11.5V7.5a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14.5a1.6 1.6 0 0 0 3 0"/></svg>';
 const ICON_BELL_ON = ICON_BELL.replace('fill="none"', 'fill="currentColor"');
-const topSeen = new WeakMap(); // panel config -> { key (list + window), mints seen in its top 3 }
+const TOP_NEW_MS = 14e3, TOP_REPEAT_MS = 60e3;
+const topNow = new WeakMap(); // panel config -> { key (list + window), mints: its top 3 now, entered: Map(mint -> when it entered) }
 let audioCtx = null, lastChime = 0;
 function unlockAudio() { // browsers only let a page make sound after a click: the bell's click opens the audio
   try { audioCtx ||= new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); } catch {}
@@ -2338,30 +2355,79 @@ function togglePanelAlert(i) {
   const c = state.panels[i];
   if (!c) return;
   c.alert = !c.alert;
-  if (c.alert) { unlockAudio(); topSeen.delete(c); checkTopAlerts(); } // what is in the top 3 now counts as seen
+  if (c.alert) { unlockAudio(); topNow.delete(c); rankMoves.delete(c); trackRankMoves(); checkTopAlerts(); } // the top 3 now is the starting point
   setupPanes(); saveSettings();
 }
-// after each list update: chime for coins new to a belled panel's top 3
-function checkTopAlerts() {
+// In a belled panel, the # column shows how a coin just moved: ▲2 up two places, ▼1 down one, "new" when it joined
+// the list. Each move shows for a minute. Ranks when the bell is turned on (or the page loads) are the starting point.
+const RANK_MOVE_MS = 60e3;
+const rankMoves = new WeakMap(); // panel config -> { key, ranks: Map(mint -> rank), moves: Map(mint -> { d, at }) }
+function trackRankMoves() {
   if (state.list !== 'both') return;
-  let fresh = [];
+  const now = Date.now();
   panes.forEach((p, i) => {
     const c = state.panels[i];
     if (!c?.alert) return;
     const key = c.list + ':' + (c.window || '');
-    let s = topSeen.get(c);
-    const first = !s || s.key !== key;
-    if (first) topSeen.set(c, s = { key, mints: new Set() });
+    let t = rankMoves.get(c);
+    const first = !t || t.key !== key;
+    if (first) rankMoves.set(c, t = { key, ranks: new Map(), moves: new Map() });
+    const next = new Map();
     for (const n of nodes) {
       const r = p.rank(n);
-      if (r == null || r > 3 || !n.mint || n.dying || !visible(n) || s.mints.has(n.mint)) continue;
-      s.mints.add(n.mint);
-      if (!first) fresh.push([p, n]);
+      if (r == null || !n.mint || n.dying) continue;
+      next.set(n.mint, r);
+      if (first) continue;
+      const was = t.ranks.get(n.mint);
+      if (was == null) t.moves.set(n.mint, { d: 'new', at: now });
+      else if (was !== r) t.moves.set(n.mint, { d: was - r, at: now });
     }
+    t.ranks = next;
+    for (const [m, v] of t.moves) if (now - v.at > RANK_MOVE_MS || !next.has(m)) t.moves.delete(m);
+  });
+}
+// a coin's latest move in pane `p`, if its panel's bell is on and the move is under a minute old
+function rankMove(p, n) {
+  const c = p && state.list === 'both' ? state.panels[p.i] : null;
+  if (!c?.alert || !n.mint) return null;
+  const v = rankMoves.get(c)?.moves.get(n.mint);
+  return v && Date.now() - v.at <= RANK_MOVE_MS ? v : null;
+}
+// after each list update: chime for coins that just entered a belled panel's top 3
+function checkTopAlerts() {
+  if (state.list !== 'both') return;
+  const now = Date.now(), fresh = [];
+  panes.forEach((p, i) => {
+    const c = state.panels[i];
+    if (!c?.alert) return;
+    const key = c.list + ':' + (c.window || '');
+    let t = topNow.get(c);
+    const first = !t || t.key !== key;
+    if (first) topNow.set(c, t = { key, mints: new Set(), entered: new Map() });
+    const cur = new Set();
+    for (const n of nodes) {
+      const r = p.rank(n);
+      if (r == null || r > 3 || !n.mint || n.dying || !visible(n)) continue;
+      cur.add(n.mint);
+      if (first || t.mints.has(n.mint)) continue;
+      const last = t.entered.get(n.mint);
+      if (last && now - last < TOP_REPEAT_MS) continue; // back after a flicker: no second alert
+      t.entered.set(n.mint, now);
+      fresh.push(p);
+    }
+    t.mints = cur;
+    for (const [m, at] of t.entered) if (now - at > TOP_REPEAT_MS) t.entered.delete(m);
   });
   if (!fresh.length) return;
   chime();
-  for (const [p] of fresh) { p.title.classList.remove('pinged'); void p.title.offsetWidth; p.title.classList.add('pinged'); }
+  for (const p of new Set(fresh)) { p.title.classList.remove('pinged'); void p.title.offsetWidth; p.title.classList.add('pinged'); }
+}
+// a coin that entered pane `p`'s top 3 in the last 14 seconds and is still there: its row is yellow
+function topNew(p, n) {
+  const c = p && state.list === 'both' ? state.panels[p.i] : null;
+  if (!c?.alert || !n.mint) return false;
+  const t = topNow.get(c), at = t?.entered.get(n.mint);
+  return !!at && Date.now() - at <= TOP_NEW_MS && t.mints.has(n.mint);
 }
 // "+ Add panel" (Panels only): a list, or Volume over a window
 $('panelMenu').innerHTML = ['trending', 'traction', 'dlmm', 'top', 'traded', 'breakout'].map(l => '<div class="item"><button type="button" class="pick" data-add="' + l + '">' + PANEL_LISTS[l] + '</button></div>').join('') +
@@ -2567,7 +2633,7 @@ function updateRow(tr, n, cols, ctx) {
   for (let i = 0; i < cols.length; i++) COLUMNS[cols[i]].set(tr.children[i], n, ctx);
   if (tr._sel !== sel) { tr._sel = sel; tr.setAttribute('aria-selected', sel ? 'true' : 'false'); }
   if (tr._tint !== tint) { tr._tint = tint; tr.style.backgroundColor = tint; }
-  const pc = pinOf(n, ctx.pane) ? (n.pin.dead ? 'pinned dead' : 'pinned') : '';
+  const pc = (pinOf(n, ctx.pane) ? (n.pin.dead ? 'pinned dead' : 'pinned') : '') + (topNew(ctx.pane, n) ? ' top-new' : '');
   if (tr._pc !== pc) { tr._pc = pc; tr.className = pc; }
   tr._v = n._v; tr._at = ctx.now; tr._maxLiq = ctx.maxLiq;
 }
